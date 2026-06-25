@@ -3,7 +3,7 @@
 来福的 Agent Skills 仓库。收集了日常 WorkBuddy / Claude Code 等 AI agent 用到的各种技能，按项目需要软链接安装。
 
 <p>
-  <img src="https://img.shields.io/badge/skills-15-blue?style=flat-square" alt="skills count">
+  <img src="https://img.shields.io/badge/skills-14-blue?style=flat-square" alt="skills count">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/maintained-yes-brightgreen?style=flat-square" alt="maintained">
 </p>
@@ -17,7 +17,7 @@
 | Skill | 说明 |
 |-------|------|
 | **ssh-skill** v3.3.0 | SSH 操作统一入口。远程连接、文件传输、端口转发、Docker/K8s 执行、跳板机穿透 |
-| **agents-remote-mount** | 通过 SSH 反向隧道把本地 `.agents` 挂载到远程服务器 |
+| **agents-remote-mount** | 把本地文件夹通过 rclone WebDAV + SSH 反向隧道挂载到远程服务器 |
 
 ### 🎨 设计 & 内容
 
@@ -48,7 +48,6 @@
 
 | Skill | 说明 |
 |-------|------|
-| **ontology** | 类型化知识图谱，管理实体及其关系，跨 skill 共享状态 |
 | **ponytail-lazy-dev** | 懒人开发原则：最少代码、最少成本、最快搞定 |
 
 ### 📈 金融数据
