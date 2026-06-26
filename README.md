@@ -3,7 +3,7 @@
 来福的 Agent Skills 仓库。收集了日常 WorkBuddy / Claude Code 等 AI agent 用到的各种技能，按项目需要软链接安装。
 
 <p>
-  <img src="https://img.shields.io/badge/skills-16-blue?style=flat-square" alt="skills count">
+  <img src="https://img.shields.io/badge/skills-14-blue?style=flat-square" alt="skills count">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/maintained-yes-brightgreen?style=flat-square" alt="maintained">
 </p>
@@ -31,9 +31,7 @@
 | Skill | 说明 |
 |-------|------|
 | **anysearch** | 实时搜索引擎，支持网页搜索、垂直搜索、批量并行搜索和 URL 内容提取 |
-| **firecrawl** | AI agent 网页抓取工具：搜索、爬取、与动态页面交互 |
-| **search-router** | 统一搜索入口，根据查询类型自动路由到 anysearch / firecrawl / a-stock-data 等 |
-| **search-skills-sh** | 从 skills.sh 社区搜索开源 agent skill |
+| **search-router** | 统一搜索入口，自动路由到 anysearch / a-stock-data 等后端引擎 |
 | **opencli-site-adapter** | 创建或修复 opencli 站点爬虫适配器 |
 
 ### ⚡ 沐曦 GPU (MetaX)
