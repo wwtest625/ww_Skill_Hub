@@ -3,7 +3,7 @@
 来福的 Agent Skills 仓库。收集了日常 WorkBuddy / Claude Code 等 AI agent 用到的各种技能，按项目需要软链接安装。
 
 <p>
-  <img src="https://img.shields.io/badge/skills-13-blue?style=flat-square" alt="skills count">
+  <img src="https://img.shields.io/badge/skills-14-blue?style=flat-square" alt="skills count">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/maintained-yes-brightgreen?style=flat-square" alt="maintained">
 </p>
@@ -31,6 +31,7 @@
 | Skill | 说明 |
 |-------|------|
 | **anysearch** | 实时搜索引擎，支持网页搜索、垂直搜索、批量并行搜索和 URL 内容提取 |
+| **cncfstack-search** | 搜索藏云阁(cncfstack.com)上的云原生资源：Docker 镜像、Helm Chart、代码仓库、Agent Skills 等 |
 | **search-router** | 统一搜索入口，自动路由到 anysearch 等后端引擎 |
 | **opencli-site-adapter** | 创建或修复 opencli 站点爬虫适配器 |
 
