@@ -1,12 +1,12 @@
 ---
 name: metax-inference-loop
-description: "沐曦 GPU 模型推理部署标准化工作流（5 阶段循环：环境评估→模型确认→容器编排→压测调优→固化交付）。适用于 C500/C550/Mars X203 等沐曦 GPU 上的 vllm/sglang 推理部署，覆盖直通 GPU、sGPU（K8s）、多机三种部署模式。"
+description: "沐曦 GPU 模型推理部署标准化工作流（5 阶段 spool：环境评估→模型确认→容器编排→压测调优→固化交付）。每次部署新模型从头 spool 一遍。适用于 C500/C550/Mars X203 等沐曦 GPU 上的 vllm/sglang 推理部署，覆盖直通 GPU、sGPU（K8s）、多机三种部署模式。"
 agent_created: true
 ---
 
-# 沐曦 GPU 推理部署轮
+# 沐曦 GPU 推理部署 spool
 
-标准化推理部署工作流。每次部署新模型走一遍这个轮，确保不遗漏、可复现。
+标准化推理部署工作流。每次部署新模型从头 spool 一遍，确保不遗漏、可复现。
 
 ## 使用时机
 
@@ -20,7 +20,7 @@ agent_created: true
 ① 环境评估 → ② 模型确认 → ③ 容器编排 → ④ 压测调优 → ⑤ 固化交付
 ```
 
-任一阶段失败 → 回退到上一阶段修正。
+任一阶段失败 → 回退到上一阶段，重新 spool。
 
 ## 详细参考
 
@@ -197,7 +197,7 @@ python3 -m sglang.bench_serving --backend sglang --dataset-name sharegpt \
 4. **max-num-seqs** — 256 → 384 → 512
 5. **环境变量** — `MACA_SMALL_PAGESIZE_ENABLE=1`（必设）、MoE 融合等
 
-口诀：TP 先给够 → gpu-mem 拉到 0.9 → batched 从 16384 调起 → 多机先搞通信
+口诀：TP 先给够 → gpu-mem 拉到 0.9 → batched 从 16384 调起 → 多机先搞通信 → 跑完一轮 spool 再决定要不要下一轮
 
 ### Checkpoint
 - [ ] 压测稳定运行（不 OOM、不 hang）

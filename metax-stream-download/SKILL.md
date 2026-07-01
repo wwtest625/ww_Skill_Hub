@@ -89,3 +89,11 @@ python scripts/stream_download.py \
 - SSH 连接需要稳定，断开会导致传输失败（文件不完整）
 - 远程目标路径需要有写权限（通常需 root）
 - 依赖 `paramiko` 库，若未安装：`pip install paramiko`
+
+## 完成检查
+
+| 步骤 | 检查条件 |
+|------|----------|
+| 获取下载链接 | opencli 输出包含文件名、大小和 URL |
+| 流式传输 | 远程文件大小与沐曦官网标注一致 |
+| 文件完整性 | 远程服务器上 `sha256sum <file>` 验证通过 |

@@ -3,7 +3,7 @@
 来福的 Agent Skills 仓库。收集了日常 WorkBuddy / Claude Code 等 AI agent 用到的各种技能，按项目需要软链接安装。
 
 <p>
-  <img src="https://img.shields.io/badge/skills-14-blue?style=flat-square" alt="skills count">
+  <img src="https://img.shields.io/badge/skills-13-blue?style=flat-square" alt="skills count">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/maintained-yes-brightgreen?style=flat-square" alt="maintained">
 </p>
@@ -16,7 +16,7 @@
 
 | Skill | 说明 |
 |-------|------|
-| **ssh-skill** v3.3.0 | SSH 操作统一入口。远程连接、文件传输、端口转发、Docker/K8s 执行、跳板机穿透 |
+| **ssh-skill** v3.3.0 | SSH 操作统一 dispatch 入口。远程连接、文件传输、端口转发、Docker/K8s、跳板机穿透 |
 | **agents-remote-mount** | 把本地文件夹通过 rclone WebDAV + SSH 反向隧道挂载到远程服务器 |
 
 ### 🎨 设计 & 内容
@@ -31,14 +31,14 @@
 | Skill | 说明 |
 |-------|------|
 | **anysearch** | 实时搜索引擎，支持网页搜索、垂直搜索、批量并行搜索和 URL 内容提取 |
-| **search-router** | 统一搜索入口，自动路由到 anysearch / a-stock-data 等后端引擎 |
+| **search-router** | 统一搜索入口，自动路由到 anysearch 等后端引擎 |
 | **opencli-site-adapter** | 创建或修复 opencli 站点爬虫适配器 |
 
 ### ⚡ 沐曦 GPU (MetaX)
 
 | Skill | 说明 |
 |-------|------|
-| **metax-inference-loop** | GPU 推理部署标准化工作流 — 5 阶段循环：环境评估→模型确认→容器编排→压测调优→固化交付 |
+| **metax-inference-loop** | GPU 推理部署标准化工作流（5 阶段 spool：环境评估→模型确认→容器编排→压测调优→固化交付） |
 | **metax-sgpu-k8s-deploy** | C500 sGPU 软切分部署到 K8s，GPU Operator + HAMi 全流程 |
 | **metax-stream-download** | 浏览器获取沐曦驱动/SDK 下载链接，流式传到远程服务器 |
 | **docx-model-guide-replace** | 沐曦 C500 模型测试指导文档模板替换 |
@@ -49,12 +49,6 @@
 |-------|------|
 | **lavish-axi** | Human-AI 协作 HTML 编辑器，用于评审/标注/修改 Agent 生成的 HTML |
 | **ponytail-lazy-dev** | 懒人开发原则：最少代码、最少成本、最快搞定 |
-
-### 📈 金融数据
-
-| Skill | 说明 |
-|-------|------|
-| **a-stock-data** | A 股全栈数据工具包：行情、研报、资金流、公告、财报查询 |
 
 ---
 

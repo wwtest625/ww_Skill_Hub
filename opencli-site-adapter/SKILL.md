@@ -161,3 +161,14 @@ If results look wrong:
 - **Class names change**: CSS Modules class names contain content hashes. They change when the site's CSS changes. Always use `[class*="keyword"]` and keep them broad enough to survive minor changes.
 - **Site requires authentication**: Some sites show a login wall for price comparison pages. The discount/deals page may be publicly accessible while the full comparison page requires login.
 - **Token-protected APIs**: Don't spend time reverse-engineering obfuscated token algorithms unless there's no alternative. Browser DOM scraping is simpler.
+
+## 完成检查
+
+| 步骤 | 检查条件 |
+|------|----------|
+| 1. 调研站点 | 确认 SSR/CSR 类型、搜索 URL 模式、是否存在 API |
+| 2. 创建骨架 | `opencli adapter list` 输出包含新站点 |
+| 3. 处理 CSR | 页面加载后目标 DOM 元素可查询到 |
+| 4. 调试 DOM | debug 输出包含预期的商品/数据 HTML 片段 |
+| 5. 提取数据 | `page.evaluate()` 返回非空结果数组，每条包含 title/price/url |
+| 6. 运行验收 | `opencli <site> search <keyword> -f md` 输出格式正确的表格 |
