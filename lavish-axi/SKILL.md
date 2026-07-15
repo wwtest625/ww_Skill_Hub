@@ -1,7 +1,9 @@
 ---
 name: lavish-axi
-description: Human-AI 协作 HTML 编辑器。用于改善 Agent 生成的 HTML 工件的人机协作体验。在生成 HTML 工件后需要人类评审/标注/修改时触发，或在老大明确说"用 lavish"时触发。
+description: Human-AI 协作 HTML 编辑器。用于改善 Agent 生成的 HTML 工件的人机协作体验。在生成 HTML
+  工件后需要人类评审/标注/修改时触发，或在老大明确说"用 lavish"时触发。
 agent_created: true
+disable: true
 ---
 
 # Lavish Axi

@@ -2,6 +2,7 @@
 name: metax-stream-download
 description: 沐曦(MetaX)软件下载 - 通过浏览器获取下载链接，流式传输到远程服务器。适用于沐曦GPU驱动/SDK下载，服务器无外网的场景。
 agent_created: true
+disable: true
 ---
 
 # metax-stream-download

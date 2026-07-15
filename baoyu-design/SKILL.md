@@ -1,6 +1,7 @@
 ---
 name: baoyu-design
 description: 生成即用 HTML 设计稿：UI 原型、落地页、仪表盘、APP 界面、幻灯片等视觉稿。用户说"设计"或"画个页面"时触发。
+disable: true
 ---
 
 # Design

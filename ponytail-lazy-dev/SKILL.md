@@ -1,7 +1,9 @@
 ---
 name: ponytail-lazy-dev
-description: 让来福像最懒的资深开发者一样思考——用最少代码、最少成本、最快方式完成任务。适用于任何编码任务，强制 YAGNI + 标准库优先 + 最简实现原则。已自动加载到来福的行为中，此 skill 作为参考记录。
+description: 让来福像最懒的资深开发者一样思考——用最少代码、最少成本、最快方式完成任务。适用于任何编码任务，强制 YAGNI + 标准库优先 +
+  最简实现原则。已自动加载到来福的行为中，此 skill 作为参考记录。
 agent_created: true
+disable: true
 ---
 
 # Ponytail 懒人资深开发者模式

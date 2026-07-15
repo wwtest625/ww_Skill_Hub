@@ -1,7 +1,8 @@
 ---
 name: agents-remote-mount
-description: "把本地文件夹挂载到远程服务器。rclone WebDAV + SSH 反向隧道，初始配置、启动管理、故障排查全流程。"
+description: 把本地文件夹挂载到远程服务器。rclone WebDAV + SSH 反向隧道，初始配置、启动管理、故障排查全流程。
 agent_created: true
+disable: true
 ---
 
 # agents-remote-mount

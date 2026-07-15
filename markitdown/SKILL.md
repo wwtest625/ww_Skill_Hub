@@ -1,6 +1,7 @@
 ---
 name: markitdown
 description: 微软开源的文件转 Markdown 工具。PDF/DOCX/PPTX/图片等转成 Markdown 给 LLM 用。
+disable: true
 ---
 
 # MarkItDown — 万物转 Markdown

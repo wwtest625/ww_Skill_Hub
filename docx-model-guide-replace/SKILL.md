@@ -1,6 +1,7 @@
 ---
 name: docx-model-guide-replace
 description: 沐曦 C500 模型测试指导文档模板替换。为新模型生成测试指导文档。
+disable: true
 ---
 
 # 模型测试指导文档模板替换 Skill

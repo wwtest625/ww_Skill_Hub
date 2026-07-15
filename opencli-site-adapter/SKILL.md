@@ -2,6 +2,7 @@
 name: opencli-site-adapter
 description: 创建或修复 opencli 站点适配器。给 opencli 添加新网站的爬虫规则，或调试现适配器。
 agent_created: true
+disable: true
 ---
 
 # OpenCLI Site Adapter

@@ -2,6 +2,7 @@
 name: metax-sgpu-k8s-deploy
 description: 沐曦 C500 sGPU 软切分部署到 K8s。GPU Operator + HAMi 调度器安装配置全流程。
 agent_created: true
+disable: true
 ---
 
 # Metax sGPU K8s 部署

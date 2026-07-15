@@ -1,7 +1,9 @@
 ---
 name: cncfstack-search
-description: 搜索藏云阁(cncfstack.com)上的云原生资源。当老大说"在藏云阁搜/找/查 X"或"cncfstack 上搜 X"时触发。覆盖资源类型：Agent Skills、Docker镜像、HelmChart、代码仓库、网站镜像、文件、Logo、软件包。
+description: 搜索藏云阁(cncfstack.com)上的云原生资源。当老大说"在藏云阁搜/找/查 X"或"cncfstack 上搜
+  X"时触发。覆盖资源类型：Agent Skills、Docker镜像、HelmChart、代码仓库、网站镜像、文件、Logo、软件包。
 agent_created: true
+disable: true
 ---
 
 # 藏云阁(cncfstack.com) 资源搜索

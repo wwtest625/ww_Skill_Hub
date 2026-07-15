@@ -1,7 +1,10 @@
 ---
 name: metax-inference-loop
-description: "沐曦 GPU 模型推理部署标准化工作流（5 阶段 spool：环境评估→模型确认→容器编排→压测调优→固化交付）。每次部署新模型从头 spool 一遍。适用于 C500/C550/Mars X203 等沐曦 GPU 上的 vllm/sglang 推理部署，覆盖直通 GPU、sGPU（K8s）、多机三种部署模式。"
+description: 沐曦 GPU 模型推理部署标准化工作流（5 阶段 spool：环境评估→模型确认→容器编排→压测调优→固化交付）。每次部署新模型从头
+  spool 一遍。适用于 C500/C550/Mars X203 等沐曦 GPU 上的 vllm/sglang 推理部署，覆盖直通
+  GPU、sGPU（K8s）、多机三种部署模式。
 agent_created: true
+disable: true
 ---
 
 # 沐曦 GPU 推理部署 spool

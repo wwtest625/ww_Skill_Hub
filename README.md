@@ -3,7 +3,7 @@
 来福的 Agent Skills 仓库。收集了日常 WorkBuddy / Claude Code 等 AI agent 用到的各种技能，按项目需要软链接安装。
 
 <p>
-  <img src="https://img.shields.io/badge/skills-14-blue?style=flat-square" alt="skills count">
+  <img src="https://img.shields.io/badge/skills-17-blue?style=flat-square" alt="skills count">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/maintained-yes-brightgreen?style=flat-square" alt="maintained">
 </p>
@@ -39,6 +39,7 @@
 
 | Skill | 说明 |
 |-------|------|
+| **bench-platform-api** | 沐曦推理压测平台 API 操作工具：创建测试任务、上传压测结果、补全配置等 |
 | **metax-inference-loop** | GPU 推理部署标准化工作流（5 阶段 spool：环境评估→模型确认→容器编排→压测调优→固化交付） |
 | **metax-sgpu-k8s-deploy** | C500 sGPU 软切分部署到 K8s，GPU Operator + HAMi 全流程 |
 | **metax-stream-download** | 浏览器获取沐曦驱动/SDK 下载链接，流式传到远程服务器 |
@@ -48,7 +49,9 @@
 
 | Skill | 说明 |
 |-------|------|
+| **grill-me** | 深度追问式方案审查，逐层拆解设计决策直到达成共识 |
 | **lavish-axi** | Human-AI 协作 HTML 编辑器，用于评审/标注/修改 Agent 生成的 HTML |
+| **llm-wiki** | 用 LLM 增量构建和维护个人知识库 Wiki，替代 RAG 检索 |
 | **ponytail-lazy-dev** | 懒人开发原则：最少代码、最少成本、最快搞定 |
 
 ---
