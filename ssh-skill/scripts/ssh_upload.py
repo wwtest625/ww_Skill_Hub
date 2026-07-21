@@ -57,16 +57,16 @@ def progress_callback(progress):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='SSH file upload tool v3.1')
-    parser.add_argument('alias', help='SSH host alias from ~/.ssh/config')
-    parser.add_argument('local_path', help='Local file or directory path')
-    parser.add_argument('remote_path', help='Remote file or directory path')
+    parser = argparse.ArgumentParser(description='SSH 文件上传工具 v3.1')
+    parser.add_argument('alias', help='SSH host 别名（来自 ~/.ssh/config）')
+    parser.add_argument('local_path', help='本地文件或目录路径')
+    parser.add_argument('remote_path', help='远程文件或目录路径')
     parser.add_argument('--resume', action='store_true',
-                        help='Enable resume for interrupted transfers')
+                        help='启用断点续传')
     parser.add_argument('--recursive', action='store_true',
-                        help='Upload directory recursively')
+                        help='递归上传目录')
     parser.add_argument('--no-progress', action='store_true',
-                        help='Disable progress output')
+                        help='禁用进度显示')
 
     args = parser.parse_args()
     remote_path = _fix_remote_path(args.remote_path)

@@ -139,12 +139,12 @@ def direct_execute(alias, command, timeout):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='SSH command execution tool v3.0')
-    parser.add_argument('alias', help='SSH host alias from ~/.ssh/config')
-    parser.add_argument('command', help='Command to execute')
-    parser.add_argument('--timeout', type=int, help='Timeout in seconds')
+    parser = argparse.ArgumentParser(description='SSH 命令执行工具 v3.0')
+    parser.add_argument('alias', help='SSH host 别名（来自 ~/.ssh/config）')
+    parser.add_argument('command', help='要执行的命令')
+    parser.add_argument('--timeout', type=int, help='超时时间（秒）')
     parser.add_argument('--no-daemon', action='store_true',
-                        help='Disable daemon mode, use direct SSH connection')
+                        help='禁用守护进程，使用直连模式')
 
     args = parser.parse_args()
     timeout = args.timeout or 30
