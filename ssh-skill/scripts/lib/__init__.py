@@ -35,7 +35,7 @@ from .utils import (
     validate_key_file
 )
 
-__version__ = "3.3.0"
+__version__ = "3.4.0"
 
 __all__ = [
     # 核心类

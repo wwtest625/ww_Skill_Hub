@@ -187,7 +187,7 @@ def main():
                         help='日志尾部行数（配合 --logs 使用）')
     parser.add_argument('--timeout', '-t', type=int, default=120,
                         help='命令执行超时（秒），默认 120')
-    parser.add_argument('--dry-run', '-n', action='store_true',
+    parser.add_argument('--dry-run', action='store_true',
                         help='仅打印将要执行的命令，不实际执行')
 
     args = parser.parse_args()
@@ -254,8 +254,12 @@ def main():
         )
     elif args.pod is None and args.command:
         # 直接在远程执行 kubectl 命令（不进 pod）
+        # 快捷指令可能已带 kubectl 前缀，避免重复
+        cmd = args.command
+        if cmd.startswith('kubectl '):
+            cmd = cmd[8:]  # 去掉 "kubectl " 前缀
         ns_flag = f"-n {args.namespace} " if args.namespace else ''
-        remote_cmd = f"kubectl {ns_flag}{args.command}"
+        remote_cmd = f"kubectl {ns_flag}{cmd}"
     else:
         parser.print_help()
         sys.exit(1)

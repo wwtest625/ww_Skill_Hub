@@ -3,7 +3,7 @@ name: search-router
 description: 统一搜索入口。根据查询类型自动路由到
   anysearch/firecrawl/a-stock-data/westock-*/search-skills-sh。用户说"搜索/查找/查一下"时触发。
 agent_created: true
-disable: true
+disable: false
 ---
 
 # 搜索路由 — 统一入口

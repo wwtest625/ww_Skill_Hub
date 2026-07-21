@@ -1,14 +1,16 @@
 ---
 name: anysearch
-description: "实时搜索引擎，支持网页搜索、垂直领域搜索、批量并行搜索和 URL 内容提取。API key 可提额，匿名也能用。"
+description: 实时搜索引擎，支持网页搜索、垂直领域搜索、批量并行搜索和 URL 内容提取。API key 可提额，匿名也能用。
 version: 2.0.0
 authors:
   - AnySearch Team
 credentials:
   - name: ANYSEARCH_API_KEY
     required: false
-    description: "API key for higher rate limits. Anonymous access available with lower rate limits."
-    storage: ".env file, environment variable, or --api_key CLI flag"
+    description: API key for higher rate limits. Anonymous access available with
+      lower rate limits.
+    storage: .env file, environment variable, or --api_key CLI flag
+disable: true
 ---
 
 ## Overview

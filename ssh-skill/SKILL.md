@@ -1,14 +1,45 @@
 ---
 name: ssh-skill
-version: 3.3.0
-description: "SSH 操作统一 dispatch 入口。将命令/文件/隧道经由脚本层 dispatch 到远程服务器。禁止直接用 bash ssh/scp。触发词：任何 SSH/远程服务器/部署/隧道相关操作。"
+version: 3.4.0
+description: "SSH 操作统一 dispatch 入口。将命令/文件/隧道经由脚本层 dispatch 到远程服务器。禁止直接用 bash ssh/scp。触发词：任何 SSH/远程服务器/部署/隧道/多连接相关操作。快捷入口：xssh。"
 allowed-tools: Bash, Read, Write, Glob
-keywords: SSH,服务器,远程,连接,命令,上传,下载,文件传输,跳板机,批量,集群,deploy,部署,运维,登录,执行,查看,检查,管理,操作,访问,传输,迁移,服务器间,隧道,端口转发,socks,shell,会话,交互式,docker,容器,docker exec,k8s,kubernetes,kubectl,pod,容器编排
+keywords: SSH,服务器,远程,连接,命令,上传,下载,文件传输,跳板机,批量,集群,deploy,部署,运维,登录,执行,查看,检查,管理,操作,访问,传输,迁移,服务器间,隧道,端口转发,socks,shell,会话,交互式,docker,容器,docker exec,k8s,kubernetes,kubectl,pod,容器编排,多连接,多节点,工作区,workspace,xssh
 ---
 
-# SSH Dispatch v3.3
+# SSH Dispatch v3.4
 
-将所有远程操作（命令、文件、隧道）经由脚本层 dispatch 到目标服务器。支持守护进程长连接、端口转发/隧道、持久 Shell 会话、自动连接复用、跳板机、批量并发、服务器间直接传输、自动错误恢复。
+将所有远程操作（命令、文件、隧道）经由脚本层 dispatch 到目标服务器。支持守护进程长连接、端口转发/隧道、持久 Shell 会话、多连接管理（Workspace + Note）、自动连接复用、跳板机、批量并发、服务器间直接传输、自动错误恢复。
+
+## 快捷入口 `xssh`
+
+**全局可用**，无需加 `python ~/.workbuddy/skills/...` 前缀：
+
+```bash
+# 默认 = ssh_execute（最常用）
+xssh <alias> "<command>"
+
+# 子命令（全称 或 简写）
+xssh docker|d <alias> <container> "<command>"
+xssh k8s|k <alias> <pod> "<command>"
+xssh shell|s <alias> ["<command>"]
+xssh connect|c <alias> ["<command>"]
+xssh upload|up <alias> <local> <remote>
+xssh download|dl <alias> <remote> <local>
+xssh transfer|tx <src-alias> <src-path> <dst-alias> <dst-path>
+xssh multi|m <create|add|exec|status|note|...>
+xssh daemon <start|stop|status|list>
+xssh tunnel|t <start|stop|status|list>
+xssh config <list|create|update|delete|find>
+xssh cluster <command> --parallel
+
+# 示例
+xssh gpu-01 "nvidia-smi"
+xssh d gpu-01 vllm "python -c 'import torch'"
+xssh m create dsv4-test
+xssh daemon list
+```
+
+`xssh -h` 查看完整帮助。实现文件：`~/bin/xssh`。
 
 ## 调用规则
 
@@ -364,6 +395,78 @@ python "~/.workbuddy/skills/ssh-skill/scripts/ssh_k8s_exec.py" gpu-node k8s-get-
 - 如果容器确定有 bash，可在命令前加 `bash -c "..."` 手动指定
 - `--shell` 模式底层走 `ssh_connect.py`，需要 TTY 环境
 - `--logs` 模式走 `kubectl logs`，不需要进入 Pod
+
+### 多连接管理（Workspace + Note）
+
+使用 `ssh_multi.py` 管理多个 SSH 连接。核心价值：**有名字、有状态、不会忘。**
+
+适用场景：四机推理部署、多机房巡检、A/B 测试对比等任何多台机器操作。
+
+**创建工作区并添加连接：**
+```bash
+# 创建工作区
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" create dsv4-test
+
+# 添加命名连接（名字自定义，alias 来自 ~/.ssh/config）
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" add dsv4-test leader gpu-node-01
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" add dsv4-test worker1 gpu-node-02
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" add dsv4-test worker2 gpu-node-03
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" add dsv4-test worker3 gpu-node-04
+```
+
+**执行命令：**
+```bash
+# 单节点执行
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" exec dsv4-test leader "nvidia-smi"
+
+# 所有节点执行同一条命令
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" exec dsv4-test --all "df -h && free -m"
+```
+
+**状态面板（核心功能——上厕所回来不会忘）：**
+```bash
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" status dsv4-test
+# 名称           SSH别名            在线     最后执行         退出码      备注
+# ────────────────────────────────────────────────────────────────────────────────
+# leader        gpu-node-01       ✅      2分钟前       0        vllm已启动,端口8000
+# worker1       gpu-node-02       ✅      5分钟前       0        已连接leader
+# worker2       gpu-node-03       ❌      15分钟前      1        CUDA路径错误,待修复
+# worker3       gpu-node-04       ✅      1分钟前       0
+
+# 实时检查在线状态（会逐台 ping，较慢）
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" status dsv4-test --check
+```
+
+**便签（解决"搞忘"的核心）：**
+```bash
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" note dsv4-test leader "vllm已启动,端口8000,TP=4"
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" note dsv4-test worker2 "CUDA路径错误,已排查到LD_LIBRARY_PATH"
+```
+
+**其他操作：**
+```bash
+# 列出所有工作区
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" list
+
+# 查看指定工作区的连接列表（JSON）
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" list --workspace dsv4-test
+
+# 检查所有连接在线状态
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" check dsv4-test
+
+# 移除单个连接
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" remove dsv4-test worker3
+
+# 删除整个工作区
+python "~/.workbuddy/skills/ssh-skill/scripts/ssh_multi.py" delete dsv4-test
+```
+
+**存储位置：** `~/.ssh/multi/<workspace>.json`，每个工作区一个 JSON 文件，可备份可分享。
+
+**CRITICAL**: 
+- `exec --all` 串行执行（非并行），每台执行完立即保存状态
+- 命令输出截断到 2000 字符，防止 JSON 过大
+- 来福在多机场景下应优先使用 ssh_multi 管理连接，每次操作后自动更新便签
 
 ### 配置管理
 
