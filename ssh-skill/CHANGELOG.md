@@ -6,6 +6,7 @@
 
 - **`xssh` 全局快捷入口**：Bash wrapper 脚本（`~/bin/xssh`），智能分发到 ssh-skill 所有子脚本。支持 12 个子命令及简写（d=docker, k=k8s, s=shell, c=connect, up=upload, dl=download, tx=transfer, m=multi, t=tunnel）。默认无子命令走 ssh_execute.py。
 - **`ssh_multi.py` 多连接管理器**：Workspace + Connection + Note 三概念模型。支持 create/add/remove/exec/status/note/check/list/delete 9 个命令。解决多机操作时"窗口泛滥、状态丢失、上厕所回来忘了"的问题。
+- **`ssh_multi.py` `--watch` 自动刷新**：`xssh m status <workspace> --watch` 每 N 秒自动刷新状态面板（默认 3 秒），Ctrl+C 退出。支持 `--interval` 自定义间隔，支持 `--watch --check` 实时 ping 检测。
 - **`ssh_daemon.py` 连接管理增强**：新增 `list` 命令（全局概览 + 实时 ping 检测），新增 `stop --all` 命令。
 
 ### 改进
@@ -17,6 +18,7 @@
 
 - **`ssh_k8s_exec.py` 参数冲突**：`--dry-run` 和 `--namespace` 都使用 `-n` 简写，去掉 dry-run 的 `-n`。
 - **`ssh_k8s_exec.py` 快捷指令**：`k8s-get-pods` 等快捷命令拼出 `kubectl kubectl get pods` 的重复前缀，已修复。
+- **英文 help 中文化**：`ssh_execute.py`、`ssh_upload.py`、`ssh_download.py` 的 argparse description 和 help 文本从英文改为中文。
 
 ---
 

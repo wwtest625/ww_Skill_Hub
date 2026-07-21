@@ -291,6 +291,28 @@ def render_status(workspace: str, check: bool = False) -> dict:
     }
 
 
+def watch_status(workspace: str, interval: int = 3, check: bool = False):
+    """自动刷新状态面板，Ctrl+C 退出"""
+    import time
+    try:
+        while True:
+            # 清屏
+            os.system('cls' if os.name == 'nt' else 'clear')
+
+            result = render_status(workspace, check=check)
+            if not result.get('success'):
+                print(json.dumps(result, ensure_ascii=True))
+                sys.exit(1)
+
+            now_str = datetime.now().strftime('%H:%M:%S')
+            print(result['table'])
+            print(f"\n[刷新于 {now_str} | 每 {interval} 秒 | Ctrl+C 退出]")
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        print("\n已退出监控")
+
+
 def render_workspace_list() -> dict:
     workspaces = list_workspaces()
     if not workspaces:
@@ -377,6 +399,10 @@ def main():
     p_status.add_argument('workspace', help='工作区名称')
     p_status.add_argument('--check', '-c', action='store_true',
                           help='实时检查在线状态（较慢）')
+    p_status.add_argument('--watch', '-w', action='store_true',
+                          help='自动刷新模式（Ctrl+C 退出）')
+    p_status.add_argument('--interval', type=int, default=3,
+                          help='刷新间隔（秒），默认 3')
 
     # note
     p_note = subparsers.add_parser('note', help='给连接贴便签')
@@ -446,12 +472,16 @@ def main():
             sys.exit(0 if result.get('success') else 1)
 
         elif args.command == 'status':
-            result = render_status(args.workspace, check=args.check)
-            if result.get('success'):
-                print(result['table'])
+            if args.watch:
+                watch_status(args.workspace, interval=args.interval,
+                             check=args.check)
             else:
-                print(json.dumps(result, ensure_ascii=True))
-                sys.exit(1)
+                result = render_status(args.workspace, check=args.check)
+                if result.get('success'):
+                    print(result['table'])
+                else:
+                    print(json.dumps(result, ensure_ascii=True))
+                    sys.exit(1)
 
         elif args.command == 'note':
             result = set_note(args.workspace, args.name, args.text)

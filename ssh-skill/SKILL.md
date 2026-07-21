@@ -71,6 +71,7 @@ xssh m add dsv4-test leader gpu-01          # 添加命名连接
 xssh m exec dsv4-test leader "nvidia-smi"   # 单节点执行
 xssh m exec dsv4-test --all "df -h"         # 所有节点执行
 xssh m status dsv4-test                     # 全局状态面板
+xssh m status dsv4-test --watch             # 自动刷新（Ctrl+C 退出）
 xssh m note dsv4-test leader "vllm已启动"    # 贴便签
 ```
 
