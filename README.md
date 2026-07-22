@@ -3,7 +3,7 @@
 来福的 Agent Skills 仓库。收集了日常 WorkBuddy / Claude Code 等 AI agent 用到的各种技能，按项目需要软链接安装。
 
 <p>
-  <img src="https://img.shields.io/badge/skills-16-blue?style=flat-square" alt="skills count">
+  <img src="https://img.shields.io/badge/skills-15-blue?style=flat-square" alt="skills count">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/maintained-yes-brightgreen?style=flat-square" alt="maintained">
 </p>
@@ -50,7 +50,6 @@
 | Skill | 说明 |
 |-------|------|
 | **grill-me** | 深度追问式方案审查，逐层拆解设计决策直到达成共识 |
-| **lavish-axi** | Human-AI 协作 HTML 编辑器，用于评审/标注/修改 Agent 生成的 HTML |
 | **ponytail-lazy-dev** | 懒人开发原则：最少代码、最少成本、最快搞定 |
 
 ---
