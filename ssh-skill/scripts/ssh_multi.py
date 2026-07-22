@@ -395,7 +395,7 @@ def main():
                         help='超时（秒），默认 60')
 
     # status
-    p_status = subparsers.add_parser('status', help='全局状态面板')
+    p_status = subparsers.add_parser('status', help='全局状态面板（--watch 自动刷新）')
     p_status.add_argument('workspace', help='工作区名称')
     p_status.add_argument('--check', '-c', action='store_true',
                           help='实时检查在线状态（较慢）')
