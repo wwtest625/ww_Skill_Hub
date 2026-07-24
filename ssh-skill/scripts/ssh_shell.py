@@ -414,18 +414,20 @@ class SSHShellSession:
                                         try:
                                             exit_code = int(parts[-1])
                                         except ValueError:
-                                            exit_code = 0
+                                            exit_code = -1  # 未知退出码，不应默认为0（成功）
                                     break
 
                             if marker_line_idx >= 0:
                                 # 清理输出：移除命令回显、标记行、标记命令回显、prompt 行
                                 cleaned_lines = []
+                                command_echo_skipped = False  # 只跳第一个命令回显行
                                 for j, l in enumerate(lines):
                                     # 跳过标记输出行
                                     if j == marker_line_idx:
                                         continue
-                                    # 跳过原始命令回显（含 command 文本的行）
-                                    if command.strip() and command.strip() in l:
+                                    # 跳过原始命令回显（仅首次出现，避免子串误杀输出）
+                                    if not command_echo_skipped and command.strip() and command.strip() in l:
+                                        command_echo_skipped = True
                                         continue
                                     # 跳过标记命令回显（含 marker 和 echo 的行）
                                     if marker in l and 'echo' in l:

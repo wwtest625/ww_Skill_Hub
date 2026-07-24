@@ -12,6 +12,8 @@
 - **`ssh_shell.py` argparse 子命令与兼容模式冲突**：子命令（session/exec/stop/list）和兼容模式（`<alias> ["<cmd>"]`）共用 positional `alias` 参数导致 argparse 解析错误。采用 Method C：先检测 `sys.argv[1]` 是否属于已知子命令，不是则走兼容模式解析器，避免冲突。`ssh_pty.py` 同步修复。
 - **`ssh_shell.py` marker 提取误匹配命令回显行**：`echo "marker" $?` 的回显行（含 prompt+`echo`+`$?`）被识别为 marker 输出行，导致退出码提取为 `$?`（ValueError → fallback 0）而非真实退出码。修复：用 `startswith(marker)` 代替 `in`，只匹配以 marker 开头的纯输出行。
 - **`ssh_shell.py` prompt 行残留**：shell prompt 行（`root@host:~#`、`bash-5.1#` 等）未被 `cleaned_lines` 和 `_clean_shell_output` 过滤，导致 stdout 残留 prompt。修复：新增 `_PROMPT_PATTERN` 正则，在 `cleaned_lines` 和 `_clean_shell_output` 两层都过滤 prompt 行。
+- **`ssh_shell.py` 命令回显子串误杀**：`command.strip() in l` 子串匹配会误杀包含命令文本的合法输出行（如 `id` 命令误杀 `uid=0(root) gid=0(root)` 行）。修复：改为 `command_echo_skipped` 标记，只跳第一个命令回显行，后续行不再匹配。
+- **`ssh_shell.py` exit_code fallback**：`int(parts[-1])` ValueError 时默认 `exit_code=0`（暗示成功），改为 `-1`（未知退出码不应当作成功）。
 
 ---
 
