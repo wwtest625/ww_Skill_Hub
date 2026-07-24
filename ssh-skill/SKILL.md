@@ -1,12 +1,12 @@
 ---
 name: ssh-skill
-version: 3.4.0
+version: 3.5.0
 description: "SSH 统一 dispatch 入口。禁止直接用 bash ssh/scp。触发词：SSH/远程/服务器/部署/隧道/Docker/K8s/多连接。快捷入口：xssh。"
 allowed-tools: Bash, Read, Write, Glob
 keywords: SSH,服务器,远程,连接,命令,上传,下载,文件传输,跳板机,批量,集群,deploy,部署,多连接,多节点,工作区,workspace,xssh,docker,容器,k8s,kubernetes,pod
 ---
 
-# SSH Dispatch v3.4
+# SSH Dispatch v3.5
 
 远程操作统一 dispatch：`xssh` 入口 → 自动路由到对应 Python 脚本。内核能力：守护进程长连接(~0.12s)、文件传输、跳板机、多连接管理。
 
@@ -26,15 +26,16 @@ xssh daemon|tunnel|transfer|config|cluster  # 守护进程/隧道/传输/配置/
 
 `xssh -h` 查看完整子命令。各子命令 `--help` 可见详细参数。实现文件：`~/bin/xssh`。
 
-## 关键决策：三个执行模式
+## 关键决策：四个执行模式
 
 | 模式 | 命令 | 何时用 |
 |------|------|--------|
 | 一次性执行 | `xssh <alias> "<cmd>"` | 独立命令、健康检查、单次查询 |
 | 持久 Shell（状态保持） | `xssh s <alias> "<cmd>"` | 多步操作需保持 cwd/env（如部署流水线） |
+| PTY 交互式 | `xssh p <alias> "<cmd>"` | mysql/REPL/交互式问答（pyte 终端模拟） |
 | 交互式终端 | `xssh c <alias>` | 人类手动调试、tail -f、htop |
 
-**规则**：AI agent 默认用一次性执行。多步关联操作用 `xssh s`。不要用 `xssh c`（无 TTY）。
+**规则**：AI agent 默认用一次性执行。多步关联操作用 `xssh s`。需要交互式问答（mysql 密码、配置向导）用 `xssh p`。不要用 `xssh c`（无 TTY）。
 
 ## Docker 容器执行（`xssh d`）
 
@@ -60,6 +61,32 @@ xssh k gpu-node my-pod --logs --tail 50 # 查看日志
 ```
 
 > 快捷命令 `k8s-get-pods` / `k8s-get-gpu` 见 `xssh k --help`
+
+## PTY 交互式终端（`xssh p`）
+
+基于 pyte 终端模拟器，支持 mysql CLI、python REPL、tail -f、交互式问答等多轮对话场景。
+
+与 `xssh s`（持久 Shell）的区别：`xssh p` 有 pyte 终端模拟层，能正确解析 ANSI 色彩和光标控制序列。
+
+```bash
+# 启动会话 + 发送命令
+xssh p gpu-01 "mysql -u root -p"
+xssh p gpu-01 "SELECT * FROM users LIMIT 5;"   # 多轮交互
+xssh p gpu-01 "exit"
+
+# 获取屏幕快照（看当前终端画面）
+xssh p gpu-01 --snapshot
+
+# 发送特殊按键
+xssh p gpu-01 -k ctrl+c      # Ctrl+C
+xssh p gpu-01 -k enter        # 回车
+xssh p gpu-01 -k up           # 方向键上
+
+# 不等待输出（立即返回）
+xssh p gpu-01 "tail -f /var/log/app.log" --no-wait
+```
+
+> 完整按键列表见 `xssh p --help`
 
 ## 多连接管理（`xssh m`）
 

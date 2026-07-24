@@ -48,6 +48,7 @@ import tempfile
 import hashlib
 import subprocess
 import threading
+import re
 import argparse
 import signal
 from typing import Optional, Dict, List
@@ -60,6 +61,20 @@ sys.path.insert(0, os.path.join(_script_dir, 'lib'))
 SHELL_DIR = os.path.join(tempfile.gettempdir(), 'ssh_shells')
 SHELL_DEFAULT_TIMEOUT = 60
 SHELL_IDLE_TIMEOUT = 600  # 10 分钟空闲自动关闭
+
+# Shell prompt 行检测正则
+# 匹配常见 prompt 格式：root@host:~#、user@host:~$、bash-5.1#、[user@host]$
+_PROMPT_PATTERN = re.compile(
+    r'^\s*'                           # 可能的前导空格
+    r'(?:'
+    r   r'\S+@\S+:[^\n]*[#$]\s*'      # user@host:path#  或 user@host:path$
+    r   r'|bash-[^\n]*[#$]\s*'        # bash-5.1#  或 bash-5.1$
+    r   r'|sh-[^\n]*[#$]\s*'          # sh-5.1#
+    r   r'|\[[^\n]*\][#$]\s*'         # [user@host]#
+    r   r'|>\s*'                       # >  (简单 prompt)
+    r')'
+    r'$'
+)
 
 
 def get_shell_id(alias: str) -> str:
@@ -383,30 +398,45 @@ class SSHShellSession:
 
                         # 检查是否包含标记行
                         if marker in output:
-                            # 提取退出码
                             lines = output.split('\n')
+
+                            # 找到标记输出行（以 marker 开头，不是命令回显）
+                            # 命令回显行格式: root@host:~# echo "marker" $?
+                            # 标记输出行格式: marker 0
+                            marker_line_idx = -1
                             for i, line in enumerate(lines):
-                                if marker in line:
-                                    # 标记行格式: echo "marker" $? → 输出 "marker" 0
-                                    parts = line.strip().split(' ')
+                                stripped = line.strip().strip('"\'')
+                                if stripped.startswith(marker):
+                                    marker_line_idx = i
+                                    # 提取退出码
+                                    parts = stripped.split(' ')
                                     if len(parts) >= 2:
                                         try:
-                                            exit_code = int(parts[-1].strip('"\''))
+                                            exit_code = int(parts[-1])
                                         except ValueError:
                                             exit_code = 0
-                                    # 移除标记行和命令回显
-                                    cleaned_lines = []
-                                    skip_command = True
-                                    for j, l in enumerate(lines):
-                                        if j == i:
-                                            continue
-                                        if skip_command and j == 0 and command.strip() in l:
-                                            continue
-                                        cleaned_lines.append(l)
-                                    output = '\n'.join(cleaned_lines)
                                     break
 
-                            if exit_code >= 0:
+                            if marker_line_idx >= 0:
+                                # 清理输出：移除命令回显、标记行、标记命令回显、prompt 行
+                                cleaned_lines = []
+                                for j, l in enumerate(lines):
+                                    # 跳过标记输出行
+                                    if j == marker_line_idx:
+                                        continue
+                                    # 跳过原始命令回显（含 command 文本的行）
+                                    if command.strip() and command.strip() in l:
+                                        continue
+                                    # 跳过标记命令回显（含 marker 和 echo 的行）
+                                    if marker in l and 'echo' in l:
+                                        continue
+                                    # 跳过 shell prompt 行（root@host:~#、bash-5.1# 等）
+                                    clean_l = l.replace('\r', '').strip()
+                                    if clean_l and _PROMPT_PATTERN.match(clean_l):
+                                        continue
+                                    cleaned_lines.append(l)
+
+                                output = '\n'.join(cleaned_lines)
                                 break
 
                     time.sleep(0.05)
@@ -439,13 +469,15 @@ class SSHShellSession:
             lines.pop(0)
 
         # 去除 ANSI 转义序列
-        import re
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         cleaned = []
         for line in lines:
             line = ansi_escape.sub('', line)
             # 去除回车符
             line = line.replace('\r', '')
+            # 跳过 shell prompt 行
+            if line.strip() and _PROMPT_PATTERN.match(line.strip()):
+                continue
             if line.strip():
                 cleaned.append(line)
 
@@ -631,8 +663,46 @@ def cmd_list() -> List[dict]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='SSH 持久 Shell 会话管理工具 v1.0')
-    subparsers = parser.add_subparsers(dest='command', help='操作命令')
+    # 检测兼容模式：第一个参数不是子命令时走兼容模式
+    known_subcommands = {'session', 'exec', 'stop', 'list', '-h', '--help', 'help'}
+    raw_args = sys.argv[1:]
+    compat_mode = len(raw_args) > 0 and raw_args[0] not in known_subcommands
+
+    if compat_mode:
+        # 兼容模式：ssh_shell.py <alias> ["<command>"] [--timeout N]
+        parser = argparse.ArgumentParser(
+            description='SSH 持久 Shell 会话管理工具 v1.0（兼容模式）')
+        parser.add_argument('alias', help='SSH host 别名')
+        parser.add_argument('command', nargs='?', default=None, help='要执行的命令')
+        parser.add_argument('--session', '-s', help='会话 ID')
+        parser.add_argument('--timeout', '-t', type=int, default=SHELL_DEFAULT_TIMEOUT,
+                            help=f'超时（秒），默认 {SHELL_DEFAULT_TIMEOUT}')
+        args = parser.parse_args()
+
+        try:
+            if args.alias and args.command:
+                result = cmd_exec(args.alias, args.command, args.timeout)
+                print(json.dumps(result, ensure_ascii=True, indent=2))
+                sys.exit(0 if result.get('success') else 1)
+            elif args.alias:
+                result = cmd_session(args.alias)
+                print(json.dumps(result, ensure_ascii=True, indent=2))
+                sys.exit(0 if result.get('success') else 1)
+            else:
+                parser.print_help()
+                sys.exit(1)
+        except Exception as e:
+            print(json.dumps({
+                'success': False,
+                'error': f"执行错误: {str(e)}"
+            }, ensure_ascii=True, indent=2), file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # 子命令模式
+    parser = argparse.ArgumentParser(
+        description='SSH 持久 Shell 会话管理工具 v1.0')
+    subparsers = parser.add_subparsers(dest='subcommand', help='操作命令')
 
     # session - 启动会话
     p_session = subparsers.add_parser('session', help='启动 shell 会话')
@@ -654,48 +724,28 @@ def main():
     # list
     p_list = subparsers.add_parser('list', help='列出所有 shell 会话')
 
-    # 兼容模式：直接 alias + command（无子命令）
-    parser.add_argument('alias', nargs='?', help='SSH host 别名（兼容模式）')
-    parser.add_argument('command', nargs='?', help='要执行的命令（兼容模式）')
-    parser.add_argument('--session', '-s', help='会话 ID（兼容模式）')
-    parser.add_argument('--timeout', '-t', type=int, default=SHELL_DEFAULT_TIMEOUT,
-                        help='超时（秒）')
-
     args = parser.parse_args()
 
     try:
-        # 有子命令
-        if args.command == 'session':
+        if args.subcommand == 'session':
             result = cmd_session(args.alias, args.idle_timeout)
             print(json.dumps(result, ensure_ascii=True, indent=2))
             sys.exit(0 if result.get('success') else 1)
 
-        elif args.command == 'exec':
+        elif args.subcommand == 'exec':
             result = cmd_exec(args.target, args.command, args.timeout)
             print(json.dumps(result, ensure_ascii=True, indent=2))
             sys.exit(0 if result.get('success') else 1)
 
-        elif args.command == 'stop':
+        elif args.subcommand == 'stop':
             result = cmd_stop(args.target)
             print(json.dumps(result, ensure_ascii=True, indent=2))
             sys.exit(0 if result.get('success') else 1)
 
-        elif args.command == 'list':
+        elif args.subcommand == 'list':
             shells = cmd_list()
             print(json.dumps(shells, ensure_ascii=True, indent=2))
             sys.exit(0)
-
-        # 兼容模式：ssh_shell.py <alias> <command>
-        elif args.alias and args.command:
-            result = cmd_exec(args.alias, args.command, args.timeout)
-            print(json.dumps(result, ensure_ascii=True, indent=2))
-            sys.exit(0 if result.get('success') else 1)
-
-        # 兼容模式：ssh_shell.py <alias>（无命令，尝试启动会话）
-        elif args.alias:
-            result = cmd_session(args.alias)
-            print(json.dumps(result, ensure_ascii=True, indent=2))
-            sys.exit(0 if result.get('success') else 1)
 
         else:
             parser.print_help()
