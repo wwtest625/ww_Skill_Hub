@@ -346,6 +346,7 @@ class PTYDaemon:
                 if self._channel.recv_ready():
                     data = self._channel.recv(READ_CHUNK)
                     if data:
+                        self._last_activity = time.time()  # PTY 有输出 = 会话活跃
                         try:
                             text = data.decode('utf-8', errors='replace')
                             with self._lock:
@@ -681,6 +682,136 @@ def cmd_snapshot(alias: str) -> dict:
     return _connect_daemon(pty_id, 'snapshot', timeout=10)
 
 
+def cmd_watch(alias: str, interval: float = 2.0) -> None:
+    """持续刷新 PTY 屏幕输出（类似 ssh_multi --watch）
+
+    每隔 interval 秒取一次 snapshot，只打印新增内容（增量输出）。
+    Ctrl+C 退出 watch（PTY 会话和远程进程继续运行）。
+    """
+    pty_id = get_pty_id(alias)
+    info = read_pty_info(pty_id)
+    if not info:
+        start_result = cmd_start(alias)
+        if not start_result.get('success'):
+            print(f"❌ 无法启动 PTY 会话: {start_result.get('error', '未知错误')}")
+            return
+        info = read_pty_info(pty_id)
+
+    remote = info.get('remote', alias)
+    print(f"📡 PTY Watch: {remote}  (interval={interval}s, Ctrl+C 退出)")
+    print(f"{'─' * 60}")
+
+    try:
+        last_screen = ''
+        while True:
+            result = _connect_daemon(pty_id, 'snapshot', timeout=10)
+            if not result.get('success'):
+                print(f"❌ PTY 会话已断开: {result.get('error', '未知')}")
+                break
+
+            screen = result.get('screen', '')
+            if screen != last_screen:
+                # 增量输出：只打印新内容
+                if last_screen:
+                    # 找出新增行
+                    old_lines = last_screen.split('\n')
+                    new_lines = screen.split('\n')
+                    # 简单策略：如果新屏幕比旧屏幕多行，打印多出的行
+                    if len(new_lines) > len(old_lines):
+                        for line in new_lines[len(old_lines):]:
+                            print(line)
+                    else:
+                        # 屏幕行数不变但内容变了，打印完整新屏幕
+                        # 找 diff 行
+                        for i, (o, n) in enumerate(zip(old_lines, new_lines)):
+                            if o != n:
+                                print(n)
+                else:
+                    # 第一次：打印完整屏幕
+                    print(screen)
+
+                last_screen = screen
+                sys.stdout.flush()
+
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        print(f"\n✅ Watch 退出（PTY 会话和远程进程继续运行）")
+
+
+def cmd_follow(alias: str, command: str, interval: float = 2.0) -> None:
+    """发送命令 + 自动持续监控输出
+
+    一体化流程：send(no-wait) → 自动进入 watch 循环。
+    适合长运行服务（vLLM serve、训练脚本等）的启动+监控。
+
+    Ctrl+C 只退出 follow（远程进程继续运行）。
+    """
+    pty_id = get_pty_id(alias)
+
+    # 确保会话存在
+    info = read_pty_info(pty_id)
+    if not info:
+        start_result = cmd_start(alias)
+        if not start_result.get('success'):
+            print(f"❌ 无法启动 PTY 会话: {start_result.get('error', '未知错误')}")
+            return
+        info = read_pty_info(pty_id)
+
+    remote = info.get('remote', alias)
+
+    # 先发命令（no-wait）
+    print(f"🚀 发送命令到 {remote}: {command}")
+    send_result = _connect_daemon(pty_id, 'send', {
+        'command': command,
+        'wait': False
+    }, timeout=10)
+
+    if not send_result.get('success'):
+        print(f"❌ 命令发送失败: {send_result.get('error', '未知')}")
+        return
+
+    # 等一秒让输出开始
+    time.sleep(1.0)
+
+    # 进入 watch 循环（增量输出）
+    print(f"📡 Follow 模式: {remote}  (interval={interval}s, Ctrl+C 退出)")
+    print(f"{'─' * 60}")
+
+    try:
+        last_screen = ''
+        while True:
+            result = _connect_daemon(pty_id, 'snapshot', timeout=10)
+            if not result.get('success'):
+                print(f"❌ PTY 会话已断开: {result.get('error', '未知')}")
+                break
+
+            screen = result.get('screen', '')
+            if screen != last_screen:
+                if last_screen:
+                    old_lines = last_screen.split('\n')
+                    new_lines = screen.split('\n')
+                    if len(new_lines) > len(old_lines):
+                        for line in new_lines[len(old_lines):]:
+                            print(line)
+                    else:
+                        for i, (o, n) in enumerate(zip(old_lines, new_lines)):
+                            if o != n:
+                                print(n)
+                else:
+                    print(screen)
+
+                last_screen = screen
+                sys.stdout.flush()
+
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        print(f"\n✅ Follow 退出（远程进程继续运行）")
+        print(f"💡 继续监控: xssh p {alias} --watch")
+        print(f"💡 发送 Ctrl+C: xssh p {alias} -k ctrl+c")
+
+
 def cmd_stop(alias: str) -> dict:
     """停止 PTY 会话"""
     pty_id = get_pty_id(alias)
@@ -730,7 +861,7 @@ def cmd_list() -> list:
 def main():
     # 检测兼容模式：第一个参数不是子命令时走兼容模式
     known_subcommands = {'start', 'send', 'send-keys', 'snapshot', 'stop', 'list',
-                         'daemon', '-h', '--help', 'help'}
+                         'follow', 'watch', 'daemon', '-h', '--help', 'help'}
     raw_args = sys.argv[1:]
     compat_mode = len(raw_args) > 0 and raw_args[0] not in known_subcommands
 
@@ -745,12 +876,22 @@ def main():
         parser.add_argument('--send-keys', '-k', default=None, help='发送特殊按键')
         parser.add_argument('--snapshot', '-s', action='store_true', help='获取屏幕快照')
         parser.add_argument('--no-wait', action='store_true', help='不等待输出')
+        parser.add_argument('--follow', '-f', action='store_true',
+                            help='发送命令后自动持续监控输出（Ctrl+C 退出）')
+        parser.add_argument('--watch', '-w', action='store_true',
+                            help='持续刷新屏幕输出（Ctrl+C 退出）')
+        parser.add_argument('--interval', type=float, default=2.0,
+                            help='watch/follow 刷新间隔（秒），默认 2.0')
         parser.add_argument('--quiet-timeout', type=float, default=QUIET_TIMEOUT,
                             help=f'输出静止超时（秒）')
         args = parser.parse_args()
 
         try:
-            if args.snapshot:
+            if args.follow and args.command:
+                cmd_follow(args.alias, args.command, interval=args.interval)
+            elif args.watch:
+                cmd_watch(args.alias, interval=args.interval)
+            elif args.snapshot:
                 result = cmd_snapshot(args.alias)
                 if result.get('success'):
                     print(result.get('screen', ''))
@@ -782,7 +923,7 @@ def main():
         description='SSH PTY 交互式终端 v1.0 — pyte 终端模拟 + Paramiko PTY',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    subparsers = parser.add_subparsers(dest='command', help='操作命令')
+    subparsers = parser.add_subparsers(dest='subcmd', help='操作命令')
 
     # start
     p_start = subparsers.add_parser('start', help='启动 PTY 会话')
@@ -806,6 +947,21 @@ def main():
     p_snap = subparsers.add_parser('snapshot', help='获取当前屏幕快照')
     p_snap.add_argument('alias', help='SSH host 别名')
 
+    # follow — 发送命令 + 自动持续监控
+    p_follow = subparsers.add_parser('follow',
+                                     help='发送命令并持续监控输出（适合长运行服务）')
+    p_follow.add_argument('alias', help='SSH host 别名')
+    p_follow.add_argument('command', help='要发送的命令（如 vLLM 启动命令）')
+    p_follow.add_argument('--interval', '-i', type=float, default=2.0,
+                          help='刷新间隔（秒），默认 2.0')
+
+    # watch — 持续刷新已有会话
+    p_watch = subparsers.add_parser('watch',
+                                    help='持续刷新 PTY 屏幕输出（Ctrl+C 退出）')
+    p_watch.add_argument('alias', help='SSH host 别名')
+    p_watch.add_argument('--interval', '-i', type=float, default=2.0,
+                          help='刷新间隔（秒），默认 2.0')
+
     # stop
     p_stop = subparsers.add_parser('stop', help='停止 PTY 会话')
     p_stop.add_argument('alias', help='SSH host 别名')
@@ -820,25 +976,25 @@ def main():
     args = parser.parse_args()
 
     try:
-        if args.command == 'start':
+        if args.subcmd == 'start':
             result = cmd_start(args.alias)
             print(json.dumps(result, ensure_ascii=True, indent=2))
             sys.exit(0 if result.get('success') else 1)
 
-        elif args.command == 'send':
+        elif args.subcmd == 'send':
             result = cmd_send(args.alias, args.command,
                               wait=not args.no_wait,
                               quiet_timeout=args.quiet_timeout)
             print(json.dumps(result, ensure_ascii=True, indent=2))
             sys.exit(0 if result.get('success') else 1)
 
-        elif args.command == 'send-keys':
+        elif args.subcmd == 'send-keys':
             result = cmd_send_keys(args.alias, args.keys,
                                    wait=not args.no_wait)
             print(json.dumps(result, ensure_ascii=True, indent=2))
             sys.exit(0 if result.get('success') else 1)
 
-        elif args.command == 'snapshot':
+        elif args.subcmd == 'snapshot':
             result = cmd_snapshot(args.alias)
             if result.get('success'):
                 print(result.get('screen', ''))
@@ -846,17 +1002,23 @@ def main():
                 print(json.dumps(result, ensure_ascii=True))
                 sys.exit(1)
 
-        elif args.command == 'stop':
+        elif args.subcmd == 'follow':
+            cmd_follow(args.alias, args.command, interval=args.interval)
+
+        elif args.subcmd == 'watch':
+            cmd_watch(args.alias, interval=args.interval)
+
+        elif args.subcmd == 'stop':
             result = cmd_stop(args.alias)
             print(json.dumps(result, ensure_ascii=True))
             sys.exit(0 if result.get('success') else 1)
 
-        elif args.command == 'list':
+        elif args.subcmd == 'list':
             sessions = cmd_list()
             print(json.dumps(sessions, ensure_ascii=True, indent=2))
             sys.exit(0)
 
-        elif args.command == 'daemon':
+        elif args.subcmd == 'daemon':
             # 内部模式：直接运行守护进程（阻塞）
             daemon = PTYDaemon(args.alias)
             result = daemon.start()

@@ -1,6 +1,6 @@
 ---
 name: ssh-skill
-version: 3.5.0
+version: 3.6.0
 description: "SSH 统一 dispatch 入口。禁止直接用 bash ssh/scp。触发词：SSH/远程/服务器/部署/隧道/Docker/K8s/多连接。快捷入口：xssh。"
 allowed-tools: Bash, Read, Write, Glob
 keywords: SSH,服务器,远程,连接,命令,上传,下载,文件传输,跳板机,批量,集群,deploy,部署,多连接,多节点,工作区,workspace,xssh,docker,容器,k8s,kubernetes,pod
@@ -33,9 +33,9 @@ xssh daemon|tunnel|transfer|config|cluster  # 守护进程/隧道/传输/配置/
 | 一次性执行 | `xssh <alias> "<cmd>"` | 独立命令、健康检查、单次查询 |
 | 持久 Shell（状态保持） | `xssh s <alias> "<cmd>"` | 多步操作需保持 cwd/env（如部署流水线） |
 | PTY 交互式 | `xssh p <alias> "<cmd>"` | mysql/REPL/交互式问答（pyte 终端模拟） |
-| 交互式终端 | `xssh c <alias>` | 人类手动调试、tail -f、htop |
+| PTY Follow（长连接） | `xssh p <alias> "<cmd>" --follow` | 启动 vLLM 等长运行服务 + 盯输出 |
 
-**规则**：AI agent 默认用一次性执行。多步关联操作用 `xssh s`。需要交互式问答（mysql 密码、配置向导）用 `xssh p`。不要用 `xssh c`（无 TTY）。
+**规则**：AI agent 默认用一次性执行。多步关联操作用 `xssh s`。交互式问答用 `xssh p`。长运行服务用 `xssh p --follow`。不要用 `xssh c`（无 TTY）。
 
 ## Docker 容器执行（`xssh d`）
 
@@ -68,25 +68,37 @@ xssh k gpu-node my-pod --logs --tail 50 # 查看日志
 
 与 `xssh s`（持久 Shell）的区别：`xssh p` 有 pyte 终端模拟层，能正确解析 ANSI 色彩和光标控制序列。
 
+**三大模式**：
+
+| 模式 | 命令 | 用途 |
+|------|------|------|
+| 发命令+拿结果 | `xssh p <alias> "<cmd>"` | mysql/REPL 问答 |
+| 发命令+持续盯 | `xssh p <alias> "<cmd>" --follow` | 启动 vLLM 等长运行服务 |
+| 只盯不发 | `xssh p <alias> --watch` | 监控已启动的服务 |
+
 ```bash
-# 启动会话 + 发送命令
+# 启动 vLLM + 自动盯输出（Ctrl+C 只退出盯，服务继续跑）
+xssh p gpu-01 "python -m vllm.entrypoints.openai.api_server ..." --follow
+
+# 继续盯已启动的服务
+xssh p gpu-01 --watch
+
+# 发现问题 → Ctrl+C 终止远程进程 → 改参数 → 重新 follow
+xssh p gpu-01 -k ctrl+c
+xssh p gpu-01 "python -m vllm ... --max-model-len 4096" --follow
+
+# 一次性命令（mysql/REPL 多轮交互）
 xssh p gpu-01 "mysql -u root -p"
-xssh p gpu-01 "SELECT * FROM users LIMIT 5;"   # 多轮交互
+xssh p gpu-01 "SELECT * FROM users LIMIT 5;"
 xssh p gpu-01 "exit"
 
-# 获取屏幕快照（看当前终端画面）
+# 屏幕快照（看当前终端画面）
 xssh p gpu-01 --snapshot
 
 # 发送特殊按键
-xssh p gpu-01 -k ctrl+c      # Ctrl+C
-xssh p gpu-01 -k enter        # 回车
-xssh p gpu-01 -k up           # 方向键上
-
-# 不等待输出（立即返回）
-xssh p gpu-01 "tail -f /var/log/app.log" --no-wait
+xssh p gpu-01 -k ctrl+c
+xssh p gpu-01 -k enter
 ```
-
-> 完整按键列表见 `xssh p --help`
 
 ## 多连接管理（`xssh m`）
 

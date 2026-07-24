@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## v3.6.0 (2026-07-24)
+
+### 新增
+
+- **`ssh_pty.py` follow 模式**：发送命令 + 自动持续监控输出（一体化流程）。适合 vLLM serve、训练脚本等长运行服务的启动+监控。Ctrl+C 只退出盯看，远程进程继续运行。命令：`xssh p <alias> "<cmd>" --follow`。
+- **`ssh_pty.py` watch 模式**：持续刷新 PTY 屏幕输出，不需要发命令。适合监控已启动的服务。命令：`xssh p <alias> --watch`。
+- **四模式表格更新**：PTY Follow（长连接）列为第四种执行模式，适合长运行服务。
+
+### 修复
+
+- **`ssh_pty.py` 空闲超时误杀长运行服务**：`_last_activity` 只在客户端请求（send/snapshot/ping）时更新，PTY 通道持续收到远程输出时未更新。vLLM 流日志但无人调客户端 → 10 分钟后守护进程误自杀。修复：`_read_loop` 收到 PTY 输出时也更新 `_last_activity`。
+
 ## v3.5.0 (2026-07-24)
 
 ### 新增
