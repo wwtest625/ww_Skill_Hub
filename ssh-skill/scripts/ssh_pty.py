@@ -30,6 +30,7 @@ import threading
 import argparse
 import re
 import subprocess
+from collections import deque
 from typing import Optional, List, Dict
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -182,10 +183,12 @@ def _recv_message(sock, timeout=None) -> dict:
 class PTYDaemon:
     """PTY 交互式会话守护进程"""
 
-    def __init__(self, alias: str, idle_timeout: int = PTY_IDLE_TIMEOUT):
+    def __init__(self, alias: str, idle_timeout: int = PTY_IDLE_TIMEOUT,
+                 keepalive: int = 0):
         self.alias = alias
         self.pty_id = get_pty_id(alias)
         self.idle_timeout = idle_timeout
+        self._keepalive = keepalive
         self._running = False
         self._server_sock = None
         self._channel = None
@@ -195,6 +198,7 @@ class PTYDaemon:
         self._lock = threading.Lock()
         self._last_activity = time.time()
         self._read_thread = None
+        self._text_buffer = deque(maxlen=5000)  # wait-for 累积文本
 
     def start(self) -> dict:
         # 检查已有会话
@@ -259,6 +263,10 @@ class PTYDaemon:
                 return {'success': False, 'error': '未提供认证方式'}
 
             client.connect(**connect_kwargs)
+
+            # SSH 保活（防止防火墙/中间设备断开空闲连接）
+            if self._keepalive > 0:
+                client.get_transport().set_keepalive(self._keepalive)
 
             # 创建 PTY 通道
             channel = client.invoke_shell(
@@ -351,12 +359,23 @@ class PTYDaemon:
                             text = data.decode('utf-8', errors='replace')
                             with self._lock:
                                 self._stream.feed(text)
+                            # 累积到 text_buffer 供 wait-for 搜索
+                            # 只保留干净文本行（去 ANSI，去空行）
+                            clean = self._strip_ansi(text).strip()
+                            if clean:
+                                self._text_buffer.append(clean)
                         except Exception:
                             pass
                 else:
                     time.sleep(0.02)
             except Exception:
                 break
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        """去除 ANSI 转义序列，返回纯文本"""
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        return ansi_escape.sub('', text)
 
     def _handle_client(self, client_sock: socket.socket):
         """处理客户端请求"""
@@ -393,6 +412,21 @@ class PTYDaemon:
                     'channel_alive': self._channel and not self._channel.closed,
                     'idle_seconds': int(time.time() - self._last_activity)
                 })
+
+            elif action == 'wait_for':
+                self._last_activity = time.time()
+                pattern = req.get('pattern', '')
+                timeout = req.get('timeout', 30)
+                interval = req.get('interval', 0.5)
+                result = self._wait_for_pattern(pattern, timeout, interval)
+                _send_message(client_sock, result)
+
+            elif action == 'resize':
+                self._last_activity = time.time()
+                cols = req.get('cols', PTY_COLS)
+                rows = req.get('rows', PTY_ROWS)
+                result = self._resize_pty(cols, rows)
+                _send_message(client_sock, result)
 
             elif action == 'shutdown':
                 _send_message(client_sock, {'status': 'shutting_down'})
@@ -521,6 +555,92 @@ class PTYDaemon:
             } if self._screen else None
         }
 
+    def _wait_for_pattern(self, pattern: str, timeout: float, interval: float) -> dict:
+        """阻塞等待屏幕输出中出现指定模式
+
+        每 interval 秒检查一次 screen.display + text_buffer 累积文本。
+        最多等待 timeout 秒。成功后返回完整屏幕内容供读取。
+        """
+        deadline = time.time() + timeout
+        last_buffer_len = len(self._text_buffer)
+
+        while time.time() < deadline:
+            # 检查通道存活
+            if not self._channel or self._channel.closed:
+                return {
+                    'success': False,
+                    'error': 'PTY 通道已关闭',
+                    'matched': False
+                }
+
+            # 构建搜索文本：当前 screen + 历史 buffer 去重
+            with self._lock:
+                screen_lines = list(self._screen.display)
+            # 清理尾部空行
+            while screen_lines and not screen_lines[-1].strip():
+                screen_lines.pop()
+            screen_text = '\n'.join(line.rstrip() for line in screen_lines)
+
+            # 也检查 text_buffer（历史输出，防止 pattern 已滚出屏幕）
+            buffer_text = '\n'.join(list(self._text_buffer))
+
+            # 在两个区域搜索
+            search_text = buffer_text + '\n' + screen_text
+            if pattern in search_text:
+                # 定位 pattern 在文本中的位置，返回上下文
+                idx = search_text.find(pattern)
+                context_start = max(0, idx - 200)
+                context_end = min(len(search_text), idx + len(pattern) + 500)
+                return {
+                    'success': True,
+                    'matched': True,
+                    'screen': screen_text,
+                    'context': search_text[context_start:context_end],
+                    'elapsed': round(time.time() - (deadline - timeout), 1)
+                }
+
+            # 检查是否有新增内容
+            current_buffer_len = len(self._text_buffer)
+            if current_buffer_len != last_buffer_len:
+                last_buffer_len = current_buffer_len
+
+            time.sleep(interval)
+
+        # 超时：返回当前快照供诊断
+        with self._lock:
+            screen_lines = list(self._screen.display)
+        while screen_lines and not screen_lines[-1].strip():
+            screen_lines.pop()
+        screen_text = '\n'.join(line.rstrip() for line in screen_lines)
+
+        return {
+            'success': False,
+            'error': f'等待模式 "{pattern}" 超时 ({timeout}s)',
+            'matched': False,
+            'screen': screen_text,
+            'elapsed': timeout
+        }
+
+    def _resize_pty(self, cols: int, rows: int) -> dict:
+        """动态调整 PTY 终端尺寸"""
+        with self._lock:
+            if not self._channel or self._channel.closed:
+                return {'success': False, 'error': 'PTY 通道已关闭'}
+
+            try:
+                self._channel.resize_pty(width=cols, height=rows)
+                if self._screen:
+                    self._screen.resize(lines=rows, columns=cols)
+            except Exception as e:
+                return {'success': False, 'error': str(e)}
+
+        return {
+            'success': True,
+            'cols': cols,
+            'rows': rows,
+            'message': f'终端已调整为 {cols}x{rows}'
+        }
+
     def _idle_check(self):
         """空闲超时检测"""
         while self._running:
@@ -586,7 +706,7 @@ def _connect_daemon(pty_id: str, action: str, payload: dict = None,
         return {'success': False, 'error': str(e)}
 
 
-def cmd_start(alias: str) -> dict:
+def cmd_start(alias: str, keepalive: int = 0) -> dict:
     """启动 PTY 会话"""
     # 如果已有会话，直接返回
     pty_id = get_pty_id(alias)
@@ -602,18 +722,21 @@ def cmd_start(alias: str) -> dict:
 
     # 后台启动守护进程
     daemon_script = os.path.join(_script_dir, 'ssh_pty.py')
+    daemon_args = [sys.executable, daemon_script, 'daemon', alias]
+    if keepalive > 0:
+        daemon_args.extend(['--keepalive', str(keepalive)])
     try:
         if os.name == 'nt':
             CREATE_NO_WINDOW = 0x08000000
             subprocess.Popen(
-                [sys.executable, daemon_script, 'daemon', alias],
+                daemon_args,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=CREATE_NO_WINDOW
             )
         else:
             subprocess.Popen(
-                [sys.executable, daemon_script, 'daemon', alias],
+                daemon_args,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True
@@ -856,12 +979,49 @@ def cmd_list() -> list:
     return result
 
 
+def cmd_wait_for(alias: str, pattern: str, timeout: float = 30.0,
+                 interval: float = 0.5) -> dict:
+    """阻塞等待输出中出现指定模式
+
+    vLLM 场景神器：等 "Uvicorn running" 出现再继续后续步骤。
+    返回 matched+context，超时返回当前快照供诊断。
+    """
+    pty_id = get_pty_id(alias)
+    info = read_pty_info(pty_id)
+    if not info:
+        start_result = cmd_start(alias)
+        if not start_result.get('success'):
+            return start_result
+        info = read_pty_info(pty_id)
+
+    if not info:
+        return {'success': False, 'error': f'无法启动 PTY 会话: {alias}'}
+
+    return _connect_daemon(pty_id, 'wait_for', {
+        'pattern': pattern,
+        'timeout': timeout,
+        'interval': interval
+    }, timeout=int(timeout) + 10)
+
+
+def cmd_resize(alias: str, cols: int, rows: int) -> dict:
+    """动态调整 PTY 终端尺寸（TUI 应用需要）"""
+    pty_id = get_pty_id(alias)
+    info = read_pty_info(pty_id)
+    if not info:
+        return {'success': False, 'error': f"PTY 会话 '{alias}' 未运行"}
+    return _connect_daemon(pty_id, 'resize', {
+        'cols': cols, 'rows': rows
+    }, timeout=10)
+
+
 # === CLI ===
 
 def main():
     # 检测兼容模式：第一个参数不是子命令时走兼容模式
     known_subcommands = {'start', 'send', 'send-keys', 'snapshot', 'stop', 'list',
-                         'follow', 'watch', 'daemon', '-h', '--help', 'help'}
+                         'follow', 'watch', 'wait-for', 'resize',
+                         'daemon', '-h', '--help', 'help'}
     raw_args = sys.argv[1:]
     compat_mode = len(raw_args) > 0 and raw_args[0] not in known_subcommands
 
@@ -882,12 +1042,37 @@ def main():
                             help='持续刷新屏幕输出（Ctrl+C 退出）')
         parser.add_argument('--interval', type=float, default=2.0,
                             help='watch/follow 刷新间隔（秒），默认 2.0')
+        parser.add_argument('--wait-for', metavar='PATTERN',
+                            help='阻塞等待输出中出现模式（如 "Uvicorn running"）')
+        parser.add_argument('--wait-timeout', type=float, default=30.0,
+                            help='wait-for 超时（秒），默认 30')
+        parser.add_argument('--keepalive', type=int, default=0, metavar='SECONDS',
+                            help='SSH 保活间隔（秒），0=禁用')
+        parser.add_argument('--resize', nargs=2, type=int, metavar=('COLS', 'ROWS'),
+                            help='动态调整终端尺寸')
         parser.add_argument('--quiet-timeout', type=float, default=QUIET_TIMEOUT,
                             help=f'输出静止超时（秒）')
         args = parser.parse_args()
 
         try:
-            if args.follow and args.command:
+            if args.resize:
+                result = cmd_resize(args.alias, args.resize[0], args.resize[1])
+                print(json.dumps(result, ensure_ascii=True, indent=2))
+                sys.exit(0 if result.get('success') else 1)
+            elif args.wait_for:
+                print(f"⏳ 等待模式 \"{args.wait_for}\" (超时 {args.wait_timeout}s)...")
+                result = cmd_wait_for(args.alias, args.wait_for,
+                                      timeout=args.wait_timeout)
+                if result.get('matched'):
+                    print(f"\n✅ 匹配成功 ({result.get('elapsed', 0)}s)")
+                    print(result.get('context', ''))
+                else:
+                    print(f"\n❌ {result.get('error', '超时')}")
+                    if result.get('screen'):
+                        print(f"--- 当前屏幕 ---")
+                        print(result['screen'])
+                    sys.exit(1)
+            elif args.follow and args.command:
                 cmd_follow(args.alias, args.command, interval=args.interval)
             elif args.watch:
                 cmd_watch(args.alias, interval=args.interval)
@@ -909,7 +1094,7 @@ def main():
                 print(json.dumps(result, ensure_ascii=True, indent=2))
                 sys.exit(0 if result.get('success') else 1)
             else:
-                result = cmd_start(args.alias)
+                result = cmd_start(args.alias, keepalive=args.keepalive)
                 print(json.dumps(result, ensure_ascii=True, indent=2))
                 sys.exit(0 if result.get('success') else 1)
         except Exception as e:
@@ -928,6 +1113,8 @@ def main():
     # start
     p_start = subparsers.add_parser('start', help='启动 PTY 会话')
     p_start.add_argument('alias', help='SSH host 别名')
+    p_start.add_argument('--keepalive', type=int, default=0, metavar='SECONDS',
+                         help='SSH 保活间隔（秒），0=禁用，建议 30')
 
     # send
     p_send = subparsers.add_parser('send', help='发送命令并获取输出')
@@ -972,12 +1159,29 @@ def main():
     # daemon（内部使用，后台运行）
     p_daemon = subparsers.add_parser('daemon', help='后台运行守护进程（内部使用）')
     p_daemon.add_argument('alias', help='SSH host 别名')
+    p_daemon.add_argument('--keepalive', type=int, default=0, metavar='SECONDS',
+                          help='SSH 保活间隔（秒）')
+
+    # wait-for — 阻塞等待输出模式
+    p_wait = subparsers.add_parser('wait-for',
+                                    help='阻塞等待输出中出现模式（如 "Uvicorn running"）')
+    p_wait.add_argument('alias', help='SSH host 别名')
+    p_wait.add_argument('pattern', help='要等待的文本模式')
+    p_wait.add_argument('--timeout', '-t', type=float, default=30.0,
+                        help='超时（秒），默认 30')
+
+    # resize — 动态调整终端尺寸
+    p_resize = subparsers.add_parser('resize', help='动态调整 PTY 终端尺寸（TUI 应用需要）')
+    p_resize.add_argument('alias', help='SSH host 别名')
+    p_resize.add_argument('cols', type=int, help='列数')
+    p_resize.add_argument('rows', type=int, help='行数')
 
     args = parser.parse_args()
 
     try:
         if args.subcmd == 'start':
-            result = cmd_start(args.alias)
+            keepalive = getattr(args, 'keepalive', 0)
+            result = cmd_start(args.alias, keepalive=keepalive)
             print(json.dumps(result, ensure_ascii=True, indent=2))
             sys.exit(0 if result.get('success') else 1)
 
@@ -1020,10 +1224,29 @@ def main():
 
         elif args.subcmd == 'daemon':
             # 内部模式：直接运行守护进程（阻塞）
-            daemon = PTYDaemon(args.alias)
+            keepalive = getattr(args, 'keepalive', 0)
+            daemon = PTYDaemon(args.alias, keepalive=keepalive)
             result = daemon.start()
             if not result.get('success'):
                 print(json.dumps(result, ensure_ascii=True), file=sys.stderr)
+            sys.exit(0 if result.get('success') else 1)
+
+        elif args.subcmd == 'wait-for':
+            print(f"⏳ 等待模式 \"{args.pattern}\" (超时 {args.timeout}s)...")
+            result = cmd_wait_for(args.alias, args.pattern, timeout=args.timeout)
+            if result.get('matched'):
+                print(f"\n✅ 匹配成功 ({result.get('elapsed', 0)}s)")
+                print(result.get('context', ''))
+            else:
+                print(f"\n❌ {result.get('error', '超时')}")
+                if result.get('screen'):
+                    print(f"--- 当前屏幕 ---")
+                    print(result['screen'])
+                sys.exit(1)
+
+        elif args.subcmd == 'resize':
+            result = cmd_resize(args.alias, args.cols, args.rows)
+            print(json.dumps(result, ensure_ascii=True, indent=2))
             sys.exit(0 if result.get('success') else 1)
 
         else:

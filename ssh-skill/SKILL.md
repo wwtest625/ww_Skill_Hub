@@ -1,12 +1,12 @@
 ---
 name: ssh-skill
-version: 3.6.0
+version: 3.7.0
 description: "SSH 统一 dispatch 入口。禁止直接用 bash ssh/scp。触发词：SSH/远程/服务器/部署/隧道/Docker/K8s/多连接。快捷入口：xssh。"
 allowed-tools: Bash, Read, Write, Glob
 keywords: SSH,服务器,远程,连接,命令,上传,下载,文件传输,跳板机,批量,集群,deploy,部署,多连接,多节点,工作区,workspace,xssh,docker,容器,k8s,kubernetes,pod
 ---
 
-# SSH Dispatch v3.5
+# SSH Dispatch v3.7
 
 远程操作统一 dispatch：`xssh` 入口 → 自动路由到对应 Python 脚本。内核能力：守护进程长连接(~0.12s)、文件传输、跳板机、多连接管理。
 
@@ -68,17 +68,24 @@ xssh k gpu-node my-pod --logs --tail 50 # 查看日志
 
 与 `xssh s`（持久 Shell）的区别：`xssh p` 有 pyte 终端模拟层，能正确解析 ANSI 色彩和光标控制序列。
 
-**三大模式**：
+**五大模式**：
 
 | 模式 | 命令 | 用途 |
 |------|------|------|
 | 发命令+拿结果 | `xssh p <alias> "<cmd>"` | mysql/REPL 问答 |
 | 发命令+持续盯 | `xssh p <alias> "<cmd>" --follow` | 启动 vLLM 等长运行服务 |
 | 只盯不发 | `xssh p <alias> --watch` | 监控已启动的服务 |
+| 阻塞等待 | `xssh p <alias> --wait-for "<模式>"` | 等 "Uvicorn running" 再继续 |
+| 动态调整 | `xssh p <alias> --resize <cols> <rows>` | TUI 应用需要大终端 |
+
+SSH 保活（防防火墙断连接）：`xssh p <alias> --keepalive 30`
 
 ```bash
 # 启动 vLLM + 自动盯输出（Ctrl+C 只退出盯，服务继续跑）
 xssh p gpu-01 "python -m vllm.entrypoints.openai.api_server ..." --follow
+
+# 等着 vLLM 真正启动好（阻塞，最多等 120 秒）
+xssh p gpu-01 --wait-for "Uvicorn running" --wait-timeout 120
 
 # 继续盯已启动的服务
 xssh p gpu-01 --watch
@@ -87,17 +94,11 @@ xssh p gpu-01 --watch
 xssh p gpu-01 -k ctrl+c
 xssh p gpu-01 "python -m vllm ... --max-model-len 4096" --follow
 
-# 一次性命令（mysql/REPL 多轮交互）
-xssh p gpu-01 "mysql -u root -p"
-xssh p gpu-01 "SELECT * FROM users LIMIT 5;"
-xssh p gpu-01 "exit"
+# SSH 保活（防止长连接被防火墙掐断）
+xssh p gpu-01 --keepalive 30
 
-# 屏幕快照（看当前终端画面）
-xssh p gpu-01 --snapshot
-
-# 发送特殊按键
-xssh p gpu-01 -k ctrl+c
-xssh p gpu-01 -k enter
+# 调整终端尺寸（TUI 应用需要）
+xssh p gpu-01 --resize 200 60
 ```
 
 ## 多连接管理（`xssh m`）

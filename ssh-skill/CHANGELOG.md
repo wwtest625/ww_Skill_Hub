@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## v3.7.0 (2026-07-31)
+
+### 新增
+
+- **`ssh_pty.py` wait-for 模式**：阻塞等待输出中出现指定模式。vLLM 场景杀手锏——`xssh p gpu-01 --wait-for "Uvicorn running" --wait-timeout 120`，等启动好了再继续后续步骤。实现：daemon 端累积 text_buffer + 轮询 screen.display 双向搜索。
+- **`ssh_pty.py` --keepalive**：SSH 保活（`transport.set_keepalive()`）。防止长连接被防火墙/中间设备掐断。`xssh p gpu-01 --keepalive 30`（每 30 秒发 keepalive）。
+- **`ssh_pty.py` resize**：动态调整 PTY 终端尺寸（`channel.resize_pty + screen.resize`）。TUI 应用（htop/vim）需要大终端时用。`xssh p gpu-01 --resize 200 60`。
+
+### 参考
+
+- 三个特性灵感来自 [pty-bridge](https://github.com/briqt/pty-bridge) review（2026-07-31）。
+
 ## v3.6.0 (2026-07-24)
 
 ### 新增
