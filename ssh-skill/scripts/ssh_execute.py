@@ -9,10 +9,12 @@ SSH命令执行CLI工具 v3.0
 用法：
     python ssh_execute.py <alias> <command> [--timeout TIMEOUT]
     python ssh_execute.py <alias> <command> --no-daemon
+    python ssh_execute.py <alias> --stdin [--timeout TIMEOUT]   # 从管道读命令
 
 示例：
     python ssh_execute.py prod-web-01 "whoami && hostname"
     python ssh_execute.py DEV-002 "df -h" --timeout 60
+    cat deploy.sh | python ssh_execute.py prod-web-01 --stdin
 """
 
 import sys
@@ -141,13 +143,31 @@ def direct_execute(alias, command, timeout):
 def main():
     parser = argparse.ArgumentParser(description='SSH 命令执行工具 v3.0')
     parser.add_argument('alias', help='SSH host 别名（来自 ~/.ssh/config）')
-    parser.add_argument('command', help='要执行的命令')
+    parser.add_argument('command', nargs='?', help='要执行的命令（--stdin 时可省略）')
+    parser.add_argument('--stdin', action='store_true',
+                        help='从标准输入读取命令（绕过命令行长度限制）')
     parser.add_argument('--timeout', type=int, help='超时时间（秒）')
     parser.add_argument('--no-daemon', action='store_true',
                         help='禁用守护进程，使用直连模式')
 
     args = parser.parse_args()
     timeout = args.timeout or 30
+
+    # 解析命令：--stdin 优先从管道读，否则用命令行参数
+    if args.stdin:
+        command = sys.stdin.buffer.read().decode('utf-8', errors='replace').strip()
+        if not command:
+            print(json.dumps({
+                'success': False,
+                'exit_code': -1,
+                'stdout': '',
+                'stderr': '--stdin 需要从标准输入提供命令（如 echo "cmd" | xssh <alias> --stdin）'
+            }, ensure_ascii=True, indent=2), file=sys.stderr)
+            sys.exit(1)
+    elif args.command:
+        command = args.command
+    else:
+        parser.error('必须提供 command 参数，或使用 --stdin 从标准输入读取')
 
     try:
         result = None
@@ -164,16 +184,16 @@ def main():
 
         if use_daemon:
             # 密码认证：尝试通过守护进程执行
-            result = try_daemon_execute(args.alias, args.command, timeout)
+            result = try_daemon_execute(args.alias, command, timeout)
 
             # 守护进程不可用，尝试后台启动
             if result is None:
                 if start_daemon_background(args.alias):
-                    result = try_daemon_execute(args.alias, args.command, timeout)
+                    result = try_daemon_execute(args.alias, command, timeout)
 
         # 仍然没有结果，使用直连（密钥认证会使用 NativeSSHClient）
         if result is None:
-            result = direct_execute(args.alias, args.command, timeout)
+            result = direct_execute(args.alias, command, timeout)
 
         print(json.dumps(result, ensure_ascii=True, indent=2))
         sys.exit(0 if result.get('success') else 1)

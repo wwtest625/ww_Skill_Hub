@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v3.7.1 (2026-08-14)
+
+### 新增
+
+- **`ssh_execute.py` --stdin**：从标准输入读命令，绕过命令行参数长度限制（~32K）。长脚本直接管道喂。用法：`cat deploy.sh | xssh <alias> --stdin`。`command` 参数改为可选，--stdin 与 command 二选一，缺一则报错。
+
 ## v3.7.0 (2026-07-31)
 
 ### 新增

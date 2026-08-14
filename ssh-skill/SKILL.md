@@ -1,6 +1,6 @@
 ---
 name: ssh-skill
-version: 3.7.0
+version: 3.7.1
 description: "SSH 统一 dispatch 入口。禁止直接用 bash ssh/scp。触发词：SSH/远程/服务器/部署/隧道/Docker/K8s/多连接。快捷入口：xssh。"
 allowed-tools: Bash, Read, Write, Glob
 keywords: SSH,服务器,远程,连接,命令,上传,下载,文件传输,跳板机,批量,集群,deploy,部署,多连接,多节点,工作区,workspace,xssh,docker,容器,k8s,kubernetes,pod
@@ -14,6 +14,8 @@ keywords: SSH,服务器,远程,连接,命令,上传,下载,文件传输,跳板�
 
 ```bash
 xssh <alias> "<cmd>"                        # 默认：远程执行命令
+xssh <alias> --stdin                       # 从管道读命令（长脚本，绕过参数长度限制）
+cat deploy.sh | xssh <alias> --stdin
 xssh docker|d <alias> <container> "<cmd>"   # Docker 容器执行
 xssh k8s|k <alias> <pod> "<cmd>"            # K8s Pod 执行
 xssh shell|s <alias> ["<cmd>"]             # 持久 Shell 会话（状态保持）
@@ -25,6 +27,8 @@ xssh daemon|tunnel|transfer|config|cluster  # 守护进程/隧道/传输/配置/
 ```
 
 `xssh -h` 查看完整子命令。各子命令 `--help` 可见详细参数。实现文件：`~/bin/xssh`。
+
+**长命令原则**：命令保持"一行触发器"，长脚本走文件或 `--stdin` 管道，别跟参数长度（~32K）较劲。
 
 ## 关键决策：四个执行模式
 
