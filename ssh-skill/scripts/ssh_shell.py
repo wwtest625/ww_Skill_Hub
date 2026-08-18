@@ -67,11 +67,11 @@ SHELL_IDLE_TIMEOUT = 600  # 10 分钟空闲自动关闭
 _PROMPT_PATTERN = re.compile(
     r'^\s*'                           # 可能的前导空格
     r'(?:'
-    r   r'\S+@\S+:[^\n]*[#$]\s*'      # user@host:path#  或 user@host:path$
-    r   r'|bash-[^\n]*[#$]\s*'        # bash-5.1#  或 bash-5.1$
-    r   r'|sh-[^\n]*[#$]\s*'          # sh-5.1#
-    r   r'|\[[^\n]*\][#$]\s*'         # [user@host]#
-    r   r'|>\s*'                       # >  (简单 prompt)
+    r'\S+@\S+:[^\n]*[#$]\s*'        # user@host:path#  或 user@host:path$
+    r'|bash-[^\n]*[#$]\s*'           # bash-5.1#  或 bash-5.1$
+    r'|sh-[^\n]*[#$]\s*'             # sh-5.1#
+    r'|\[[^\n]*\][#$]\s*'            # [user@host]#
+    r'|>\s*'                          # >  (简单 prompt)
     r')'
     r'$'
 )
@@ -403,10 +403,17 @@ class SSHShellSession:
                             # 找到标记输出行（以 marker 开头，不是命令回显）
                             # 命令回显行格式: root@host:~# echo "marker" $?
                             # 标记输出行格式: marker 0
+                            # 注意：输出可能包含 ANSI 转义码，marker 不一定在行首
+                            # 通过检查行尾是否是数字来区分命令回显和实际结果
                             marker_line_idx = -1
                             for i, line in enumerate(lines):
                                 stripped = line.strip().strip('"\'')
-                                if stripped.startswith(marker):
+                                if marker not in stripped:
+                                    continue
+                                # 结果行特征：marker 后跟空格+数字（如 "marker 0"），末尾是数字
+                                # 命令回显行特征：包含 "echo" 和 "$?"，末尾不是纯数字
+                                rest = stripped.split(marker, 1)[1].strip()
+                                if rest and rest[-1].isdigit():
                                     marker_line_idx = i
                                     # 提取退出码
                                     parts = stripped.split(' ')
