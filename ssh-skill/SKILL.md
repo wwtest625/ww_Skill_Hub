@@ -1,109 +1,62 @@
 ---
 name: ssh-skill
-version: 3.7.1
-description: "SSH 统一 dispatch 入口。禁止直接用 bash ssh/scp。触发词：SSH/远程/服务器/部署/隧道/Docker/K8s/多连接。快捷入口：xssh。"
+version: 3.8.0
+description: "SSH 统一 dispatch 入口。核心命令(xssh)已用 Go 重写(v0.2)，性能更高、exit code 准确。禁止直接用 bash ssh/scp。触发词：SSH/远程/服务器/部署/隧道/Docker/K8s/多连接。快捷入口：xssh。"
 allowed-tools: Bash, Read, Write, Glob
-keywords: SSH,服务器,远程,连接,命令,上传,下载,文件传输,跳板机,批量,集群,deploy,部署,多连接,多节点,工作区,workspace,xssh,docker,容器,k8s,kubernetes,pod
+keywords: SSH,服务器,远程,连接,命令,上传,下载,文件传输,跳板机,批量,集群,deploy,部署,多连接,多节点,工作区,workspace,xssh,docker,容器,k8s,kubernetes,pod,go,重寫
 ---
 
-# SSH Dispatch v3.7
+# SSH Dispatch v3.8
 
-远程操作统一 dispatch：`xssh` 入口 → 自动路由到对应 Python 脚本。内核能力：守护进程长连接(~0.12s)、文件传输、跳板机、多连接管理。
+远程操作统一 dispatch：`xssh`（Go 二进制）→ 核心命令执行 / 文件传输 / 多连接管理。
+高级功能（Docker/K8s/PTY/守护进程）仍走 Python 脚本。
 
-## xssh 入口
+> **版本说明**：`xssh` 核心（execute/upload/download/shell/multi/list）已从 Python 迁移到 Go（v0.2），解决 exit code 误报、性能问题。Python 版本（v3.7.1）保留在 `~/.workbuddy/skills/ssh-skill/`，Docker/K8s/PTY/守护进程等高级功能仍依赖它。
+
+## xssh 入口（Go 版 v0.2）
 
 ```bash
-xssh <alias> "<cmd>"                        # 默认：远程执行命令
+xssh <alias> "<cmd>"                        # 默认：远程执行命令（exit code 精准）
 xssh <alias> --stdin                       # 从管道读命令（长脚本，绕过参数长度限制）
 cat deploy.sh | xssh <alias> --stdin
-xssh docker|d <alias> <container> "<cmd>"   # Docker 容器执行
-xssh k8s|k <alias> <pod> "<cmd>"            # K8s Pod 执行
 xssh shell|s <alias> ["<cmd>"]             # 持久 Shell 会话（状态保持）
-xssh connect|c <alias> ["<cmd>"]           # 交互式终端（需 TTY）
-xssh multi|m <create|add|exec|status|note|...>  # 多连接管理
-xssh upload|up <alias> <local> <remote>    # 上传文件
-xssh download|dl <alias> <remote> <local>  # 下载文件
-xssh daemon|tunnel|transfer|config|cluster  # 守护进程/隧道/传输/配置/批量
+xssh multi|m <create|add|exec|status|note>  # 多连接管理
+xssh upload|up <alias> <local> <remote>    # 上传文件（--resume 断点续传）
+xssh download|dl <alias> <remote> <local>  # 下载文件（--resume 断点续传）
+xssh list                                  # 列出所有服务器别名
+xssh -h                                    # 查看完整帮助
 ```
 
-`xssh -h` 查看完整子命令。各子命令 `--help` 可见详细参数。实现文件：`~/bin/xssh`。
+**xssh 特点**：
+- exit code 精准（base64 编码 + marker 机制，支持 `exit N` 命令）
+- 上传/下载带实时进度条
+- `--resume` 断点续传
+- 无守护进程，每次新建连接（性能损耗约 0.3s）
 
-**长命令原则**：命令保持"一行触发器"，长脚本走文件或 `--stdin` 管道，别跟参数长度（~32K）较劲。
+`xssh --help` 或 `xssh -h` 查看全部子命令和选项。
 
-## 关键决策：四个执行模式
+**长命令原则**：命令保持"一行触发器"，长脚本走文件或 `--stdin` 管道。
+
+## 关键决策：执行模式选择
 
 | 模式 | 命令 | 何时用 |
 |------|------|--------|
-| 一次性执行 | `xssh <alias> "<cmd>"` | 独立命令、健康检查、单次查询 |
+| 一次性执行 | `xssh <alias> "<cmd>"` | 独立命令、健康检查、单次查询（**AI 默认用这个**） |
 | 持久 Shell（状态保持） | `xssh s <alias> "<cmd>"` | 多步操作需保持 cwd/env（如部署流水线） |
-| PTY 交互式 | `xssh p <alias> "<cmd>"` | mysql/REPL/交互式问答（pyte 终端模拟） |
-| PTY Follow（长连接） | `xssh p <alias> "<cmd>" --follow` | 启动 vLLM 等长运行服务 + 盯输出 |
 
-**规则**：AI agent 默认用一次性执行。多步关联操作用 `xssh s`。交互式问答用 `xssh p`。长运行服务用 `xssh p --follow`。不要用 `xssh c`（无 TTY）。
+**规则**：AI agent 默认用 `xssh <alias> "<cmd>"`。多步关联操作用 `xssh s`。
 
-## Docker 容器执行（`xssh d`）
+## 高级功能（Python 脚本）
 
-核心原理：`docker exec` 默认 non-interactive → 不加载 `.bashrc` → PATH/LD_LIBRARY_PATH 丢失。
-
-**`xssh d` 自动用 `bash -l -c` 包裹**，加载完整 login shell 环境。
+Docker、K8s、PTY 交互式终端仍通过 Python 脚本实现。xssh 已路由到对应脚本：
 
 ```bash
-xssh d gpu-node my_container "nvidia-smi"
-xssh d gpu-node my_container "python train.py" -e CUDA_VISIBLE_DEVICES=0
+xssh docker|d <alias> <container> "<cmd>"   # Docker 容器执行
+xssh k8s|k <alias> <pod> "<cmd>"            # K8s Pod 执行
+xssh pty|p <alias> "<cmd>"                  # PTY 交互式终端（pyte 模拟）
 ```
 
-> 更多参数见 `xssh d --help`
-
-## K8s Pod 执行（`xssh k`）
-
-核心原理：Pod 容器可能没有 bash → 默认用 `sh -c` 包装。
-
-```bash
-xssh k gpu-node my-pod "nvidia-smi"
-xssh k gpu-node my-pod --shell          # 交互式进入
-xssh k gpu-node my-pod --logs --tail 50 # 查看日志
-```
-
-> 快捷命令 `k8s-get-pods` / `k8s-get-gpu` 见 `xssh k --help`
-
-## PTY 交互式终端（`xssh p`）
-
-基于 pyte 终端模拟器，支持 mysql CLI、python REPL、tail -f、交互式问答等多轮对话场景。
-
-与 `xssh s`（持久 Shell）的区别：`xssh p` 有 pyte 终端模拟层，能正确解析 ANSI 色彩和光标控制序列。
-
-**五大模式**：
-
-| 模式 | 命令 | 用途 |
-|------|------|------|
-| 发命令+拿结果 | `xssh p <alias> "<cmd>"` | mysql/REPL 问答 |
-| 发命令+持续盯 | `xssh p <alias> "<cmd>" --follow` | 启动 vLLM 等长运行服务 |
-| 只盯不发 | `xssh p <alias> --watch` | 监控已启动的服务 |
-| 阻塞等待 | `xssh p <alias> --wait-for "<模式>"` | 等 "Uvicorn running" 再继续 |
-| 动态调整 | `xssh p <alias> --resize <cols> <rows>` | TUI 应用需要大终端 |
-
-SSH 保活（防防火墙断连接）：`xssh p <alias> --keepalive 30`
-
-```bash
-# 启动 vLLM + 自动盯输出（Ctrl+C 只退出盯，服务继续跑）
-xssh p gpu-01 "python -m vllm.entrypoints.openai.api_server ..." --follow
-
-# 等着 vLLM 真正启动好（阻塞，最多等 120 秒）
-xssh p gpu-01 --wait-for "Uvicorn running" --wait-timeout 120
-
-# 继续盯已启动的服务
-xssh p gpu-01 --watch
-
-# 发现问题 → Ctrl+C 终止远程进程 → 改参数 → 重新 follow
-xssh p gpu-01 -k ctrl+c
-xssh p gpu-01 "python -m vllm ... --max-model-len 4096" --follow
-
-# SSH 保活（防止长连接被防火墙掐断）
-xssh p gpu-01 --keepalive 30
-
-# 调整终端尺寸（TUI 应用需要）
-xssh p gpu-01 --resize 200 60
-```
+> 见 `xssh d --help` / `xssh k --help` / `xssh p --help`
 
 ## 多连接管理（`xssh m`）
 
@@ -115,28 +68,22 @@ xssh m add dsv4-test leader gpu-01          # 添加命名连接
 xssh m exec dsv4-test leader "nvidia-smi"   # 单节点执行
 xssh m exec dsv4-test --all "df -h"         # 所有节点执行
 xssh m status dsv4-test                     # 全局状态面板
-xssh m status dsv4-test --watch             # 自动刷新（Ctrl+C 退出）
 xssh m note dsv4-test leader "vllm已启动"    # 贴便签
 ```
 
 > 完整命令见 `xssh m --help`
 
-## 上传 / 下载
+## 上传 / 下载（Go 版 v0.2）
 
 ```bash
-xssh up <alias> "<本地>" "<远程>"
-xssh dl <alias> "<远程>" "<本地>"
+xssh upload|up <alias> <local> <remote>    # 上传文件
+xssh download|dl <alias> <remote> <local>  # 下载文件
 ```
 
-xssh 自动处理 `MSYS_NO_PATHCONV=1`（Windows 路径转换防护）。支持 `--resume` 断点续传。
-
-## 守护进程
-
-自动运行：`xssh` 首次执行时自动启动参数长连接守护进程。空 30 分钟自动退出。
-
-手动管理：`xssh daemon <start|stop|status|list>`（日常不需要）。
-
-性能：直连 ~0.45s/次，守护进程 ~0.12s/次。
+- 实时进度条（stderr）
+- `--resume` 断点续传（上传/下载均支持）
+- `--recursive` 递归目录传输
+- 自动处理 Windows 路径转换（`MSYS_NO_PATHCONV=1`）
 
 ## 配置文件
 
@@ -156,11 +103,12 @@ Host gpu-01
 ## 强制规则
 
 - 所有远程操作走 `xssh`，禁止直接写 `ssh`/`scp`
-- AI agent 默认用 `xssh` 一次性执行，多步操作用 `xssh s`
+- AI agent 默认用 `xssh <alias> "<cmd>"` 一次性执行，多步操作用 `xssh s`
 - 多机场景用 `xssh m` 管理连接和便签
 - 命令参数用 `xssh <子命令> --help` 查询，不要死记
 - `xssh` 不可用时回退：`python ~/.workbuddy/skills/ssh-skill/scripts/ssh_execute.py <alias> "<cmd>"`
 
 ## 依赖
 
-- Python 3.8+ / paramiko
+- Go 1.24+（核心 xssh 二进制）
+- Python 3.8+ / paramiko（Docker/K8s/PTY 高级功能）
