@@ -12,10 +12,11 @@
 
 ## 📦 Skills 一览
 
-### 🤖 SSH & 远程操作
+### 🤖 多 Agent 协同 & 远程操作
 
 | Skill | 说明 |
 |-------|------|
+| **agent-collab** v1.2.0 | 三 Agent（agy/qoder/CodeBuddy）异构协作手册与工具包：跨 Agent 会话注入（Session Injection）、统一日志查看器、共享基建与踩坑规范 |
 | **ssh-skill** v3.3.0 | SSH 操作统一 dispatch 入口。远程连接、文件传输、端口转发、Docker/K8s、跳板机穿透 |
 | **agents-remote-mount** | 把本地文件夹通过 rclone WebDAV + SSH 反向隧道挂载到远程服务器 |
 
