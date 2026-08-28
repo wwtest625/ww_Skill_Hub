@@ -2,10 +2,12 @@
 """三 Agent (agy / qoder / CodeBuddy) 统一会话记录查看器。
 
 聚合查看本机 /root 下三大 Agent 的全部会话历史与对话详情。
+默认自动过滤无实际交互的空会话与控制指令（如 (/resume)、(/clear)、(空会话)）。
 
 用法:
-  python3 agent-log-viewer.py                     # 统一按时间列出最近 20 条会话
+  python3 agent-log-viewer.py                     # 统一按时间列出最近 25 条有效会话
   python3 agent-log-viewer.py -n 50               # 查看最近 50 条会话
+  python3 agent-log-viewer.py -A / --all          # 查看全部会话（包含空会话/指令）
   python3 agent-log-viewer.py -g 关键词           # 全局检索所有 Agent 的匹配会话
   python3 agent-log-viewer.py -w 工作区           # 按工作空间/项目名筛选 (如 metax-workbench)
   python3 agent-log-viewer.py --agent agy         # 仅看 agy 会话 (可选 agy / qoder / codebuddy)
@@ -63,6 +65,14 @@ def normalize_workspace(raw_ws):
     return ws or "root"
 
 
+def is_noisy_session(title):
+    if not title or title == "(空会话)":
+        return True
+    if title.startswith("(/") and title.endswith(")"):
+        return True
+    return False
+
+
 def extract_qoder_title(events):
     title = next((e.get("aiTitle") or "" for e in events if e.get("type") == "ai-title"), "")
     if title:
@@ -106,7 +116,7 @@ def extract_cb_title(events):
     return "(空会话)"
 
 
-def get_agy_sessions(agy_mod, grep=None, ws_filter=None):
+def get_agy_sessions(agy_mod, grep=None, ws_filter=None, show_all=False):
     files = glob.glob(os.path.join(AGY_CONV_DIR, "*.db"))
     sums = agy_mod.load_summaries()
     res = []
@@ -140,6 +150,9 @@ def get_agy_sessions(agy_mod, grep=None, ws_filter=None):
                 except Exception:
                     title = "(未命名会话)"
 
+        if not show_all and is_noisy_session(title):
+            continue
+
         if wskw and wskw not in ws.lower() and wskw not in str(raw_ws).lower():
             continue
         if kw:
@@ -157,7 +170,7 @@ def get_agy_sessions(agy_mod, grep=None, ws_filter=None):
     return res
 
 
-def get_qoder_sessions(qoder_mod, grep=None, ws_filter=None):
+def get_qoder_sessions(qoder_mod, grep=None, ws_filter=None, show_all=False):
     files = glob.glob(os.path.join(QODER_PROJ_DIR, "*", "*.jsonl"))
     res = []
     kw = grep.lower() if grep else None
@@ -168,10 +181,14 @@ def get_qoder_sessions(qoder_mod, grep=None, ws_filter=None):
         sid = os.path.basename(p)[:36]
         raw_folder = os.path.basename(os.path.dirname(p))
         ws = normalize_workspace(raw_folder)
-        if wskw and wskw not in ws.lower() and wskw not in raw_folder.lower():
-            continue
         events = qoder_mod.load_events(p)
         title = extract_qoder_title(events)
+
+        if not show_all and is_noisy_session(title):
+            continue
+
+        if wskw and wskw not in ws.lower() and wskw not in raw_folder.lower():
+            continue
         if kw:
             if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not qoder_mod.file_contains_keyword(p, grep):
                 continue
@@ -187,7 +204,7 @@ def get_qoder_sessions(qoder_mod, grep=None, ws_filter=None):
     return res
 
 
-def get_cb_sessions(cb_mod, grep=None, ws_filter=None):
+def get_cb_sessions(cb_mod, grep=None, ws_filter=None, show_all=False):
     files = glob.glob(os.path.join(CB_PROJ_DIR, "*", "*.jsonl"))
     res = []
     kw = grep.lower() if grep else None
@@ -198,10 +215,14 @@ def get_cb_sessions(cb_mod, grep=None, ws_filter=None):
         sid = os.path.basename(p)[:-6]
         raw_ws = os.path.basename(os.path.dirname(p))
         ws = normalize_workspace(raw_ws)
-        if wskw and wskw not in ws.lower() and wskw not in raw_ws.lower():
-            continue
         events = cb_mod.load_events(p)
         title = extract_cb_title(events)
+
+        if not show_all and is_noisy_session(title):
+            continue
+
+        if wskw and wskw not in ws.lower() and wskw not in raw_ws.lower():
+            continue
         if kw:
             if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not cb_mod.file_contains_keyword(p, grep):
                 continue
@@ -259,6 +280,7 @@ def main():
     p.add_argument("-g", "--grep", metavar="关键词", help="全局搜索或对话内过滤关键词")
     p.add_argument("-w", "--workspace", metavar="工作区", help="按工作区/项目名筛选 (如 metax-workbench)")
     p.add_argument("-n", "--limit", type=int, default=25, help="列表最大显示数量 (默认 25)")
+    p.add_argument("-A", "--all", action="store_true", help="显示全部会话（包含空会话与控制指令）")
     p.add_argument("-a", "--agent", choices=["agy", "qoder", "codebuddy", "all"], default="all",
                    help="筛选特定 agent 的会话")
     p.add_argument("-T", "--no-thinking", action="store_true", help="agy 会话跳过思考流")
@@ -295,16 +317,16 @@ def main():
 
     all_sessions = []
     if args.agent in ("all", "agy"):
-        all_sessions.extend(get_agy_sessions(agy_mod, grep=args.grep, ws_filter=args.workspace))
+        all_sessions.extend(get_agy_sessions(agy_mod, grep=args.grep, ws_filter=args.workspace, show_all=args.all))
     if args.agent in ("all", "qoder"):
-        all_sessions.extend(get_qoder_sessions(qoder_mod, grep=args.grep, ws_filter=args.workspace))
+        all_sessions.extend(get_qoder_sessions(qoder_mod, grep=args.grep, ws_filter=args.workspace, show_all=args.all))
     if args.agent in ("all", "codebuddy"):
-        all_sessions.extend(get_cb_sessions(cb_mod, grep=args.grep, ws_filter=args.workspace))
+        all_sessions.extend(get_cb_sessions(cb_mod, grep=args.grep, ws_filter=args.workspace, show_all=args.all))
 
     all_sessions.sort(key=lambda x: x["mtime"], reverse=True)
 
     if not all_sessions:
-        msg = "未找到任何会话记录"
+        msg = "未找到任何有效会话记录"
         if args.grep and args.workspace:
             msg = f"未找到匹配关键词 '{args.grep}' 且工作区包含 '{args.workspace}' 的会话记录"
         elif args.grep:
@@ -323,8 +345,11 @@ def main():
         agent_tag = f"[{s['agent']}]"
         print(f"{s['ts']:<17} {agent_tag:<12} {s['ws'][:22]:<22} {s['title'][:36]:<36} {s['sid']}")
     
+    hint = "（已自动过滤空会话/指令，可用 -A 查看全部）" if not args.all else ""
     if total_count > args.limit:
-        print(f"\n共 {total_count} 条记录，已展示前 {args.limit} 条（可用 -n <数字> 查看更多）。")
+        print(f"\n共 {total_count} 条有效记录，已展示前 {args.limit} 条（可用 -n <数字> 查看更多）{hint}。")
+    elif hint:
+        print(f"\n共 {total_count} 条有效记录 {hint}。")
 
 
 if __name__ == "__main__":
