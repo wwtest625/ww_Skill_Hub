@@ -16,7 +16,9 @@
 import sys
 import glob
 import os
+import re
 import json
+import sqlite3
 import signal
 import argparse
 import subprocess
@@ -61,6 +63,49 @@ def normalize_workspace(raw_ws):
     return ws or "root"
 
 
+def extract_qoder_title(events):
+    title = next((e.get("aiTitle") or "" for e in events if e.get("type") == "ai-title"), "")
+    if title:
+        return title
+    for e in events:
+        if e.get("type") == "user":
+            msg = e.get("message") or {}
+            content = msg.get("content")
+            if isinstance(content, str):
+                text = content.strip()
+                if text.startswith("<system-reminder") or text.startswith("<local-command"):
+                    continue
+                m = re.search(r"<command-name>([^<]+)</command-name>", text)
+                if m:
+                    return f"({m.group(1)})"
+                if text:
+                    return text.replace("\n", " ")[:36]
+            elif isinstance(content, list):
+                for b in content:
+                    if b.get("type") in ("text", "input_text"):
+                        t = (b.get("text") or "").strip()
+                        if t and not t.startswith("<system-") and not t.startswith("<local-"):
+                            return t.replace("\n", " ")[:36]
+    return "(空会话)"
+
+
+def extract_cb_title(events):
+    title = next((e.get("aiTitle") or "" for e in events if e.get("type") == "ai-title"), "")
+    if title:
+        return title
+    for e in events:
+        if e.get("type") == "message" and e.get("role") == "user":
+            for b in e.get("content", []):
+                t = (b.get("text") or "").strip()
+                if not t or t.startswith("<system-reminder") or t.startswith("<local-command"):
+                    continue
+                m = re.search(r"<command-name>([^<]+)</command-name>", t)
+                if m:
+                    return f"({m.group(1)})"
+                return t.replace("\n", " ")[:36]
+    return "(空会话)"
+
+
 def get_agy_sessions(agy_mod, grep=None, ws_filter=None):
     files = glob.glob(os.path.join(AGY_CONV_DIR, "*.db"))
     sums = agy_mod.load_summaries()
@@ -72,19 +117,40 @@ def get_agy_sessions(agy_mod, grep=None, ws_filter=None):
         mtime = os.path.getmtime(p)
         ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
         preview = sums.get(sid, {}).get("preview", "")
+        steps = sums.get(sid, {}).get("steps", 0)
         raw_ws = sums.get(sid, {}).get("workspace", "")
         ws = normalize_workspace(raw_ws)
+
+        title = preview
+        if not title:
+            if steps == 0:
+                title = "(空会话)"
+            else:
+                try:
+                    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+                    cur = conn.cursor()
+                    cur.execute("SELECT step_payload FROM steps WHERE step_type=14 ORDER BY idx LIMIT 1")
+                    row = cur.fetchone()
+                    conn.close()
+                    if row and row[0]:
+                        texts = agy_mod.extract_texts(row[0])
+                        title = texts[0].replace("\n", " ")[:36] if texts else "(未命名会话)"
+                    else:
+                        title = "(未命名会话)"
+                except Exception:
+                    title = "(未命名会话)"
+
         if wskw and wskw not in ws.lower() and wskw not in str(raw_ws).lower():
             continue
         if kw:
-            if kw not in preview.lower() and kw not in sid.lower() and kw not in ws.lower() and not agy_mod.db_contains_keyword(p, grep):
+            if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not agy_mod.db_contains_keyword(p, grep):
                 continue
         res.append({
             "agent": "agy",
             "mtime": mtime,
             "ts": ts,
             "ws": ws,
-            "title": preview,
+            "title": title,
             "sid": sid,
             "path": p
         })
@@ -105,7 +171,7 @@ def get_qoder_sessions(qoder_mod, grep=None, ws_filter=None):
         if wskw and wskw not in ws.lower() and wskw not in raw_folder.lower():
             continue
         events = qoder_mod.load_events(p)
-        title = next((e.get("aiTitle") or "" for e in events if e.get("type") == "ai-title"), "")
+        title = extract_qoder_title(events)
         if kw:
             if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not qoder_mod.file_contains_keyword(p, grep):
                 continue
@@ -135,7 +201,7 @@ def get_cb_sessions(cb_mod, grep=None, ws_filter=None):
         if wskw and wskw not in ws.lower() and wskw not in raw_ws.lower():
             continue
         events = cb_mod.load_events(p)
-        title = next((e.get("aiTitle") or "" for e in events if e.get("type") == "ai-title"), "")
+        title = extract_cb_title(events)
         if kw:
             if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not cb_mod.file_contains_keyword(p, grep):
                 continue
