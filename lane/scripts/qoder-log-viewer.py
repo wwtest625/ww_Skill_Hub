@@ -21,7 +21,7 @@ from datetime import datetime
 # 被 head/管道截断时静默退出，不打印 BrokenPipeError
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
-PROJ_DIR = "/root/.qoder/projects/-root"
+PROJ_DIR = "/root/.qoder/projects"
 TOOL_USE_MAP = {}
 
 
@@ -94,7 +94,7 @@ def result_text(b):
 
 
 def list_sessions(grep=None):
-    paths = sorted(glob.glob(os.path.join(PROJ_DIR, "*.jsonl")),
+    paths = sorted(glob.glob(os.path.join(PROJ_DIR, "*", "*.jsonl")),
                    reverse=True, key=os.path.getmtime)
     if not paths:
         print("未找到任何会话记录")
@@ -268,7 +268,7 @@ def main():
     if os.path.isfile(arg):
         path = arg
     else:
-        matches = [p for p in glob.glob(os.path.join(PROJ_DIR, "*.jsonl"))
+        matches = [p for p in glob.glob(os.path.join(PROJ_DIR, "*", "*.jsonl"))
                    if arg in os.path.basename(p)]
         if len(matches) == 1:
             path = matches[0]
