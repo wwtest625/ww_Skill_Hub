@@ -413,10 +413,22 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       <div class="sidebar-section">
         <h4>Agent 泳道</h4>
-        <div class="nav-item active" onclick="setAgent('all')" id="agent-all">全部 Agent</div>
-        <div class="nav-item" onclick="setAgent('agy')" id="agent-agy">agy (架构研发)</div>
-        <div class="nav-item" onclick="setAgent('qoder')" id="agent-qoder">qoder (前端交互)</div>
-        <div class="nav-item" onclick="setAgent('codebuddy')" id="agent-codebuddy">CodeBuddy (审查归档)</div>
+        <div class="nav-item active" onclick="setAgent('all')" id="agent-all">
+          <span>全部 Agent</span>
+          <span class="count" id="count-agent-all">0</span>
+        </div>
+        <div class="nav-item" onclick="setAgent('agy')" id="agent-agy">
+          <span>agy (架构研发)</span>
+          <span class="count" id="count-agent-agy">0</span>
+        </div>
+        <div class="nav-item" onclick="setAgent('qoder')" id="agent-qoder">
+          <span>qoder (前端交互)</span>
+          <span class="count" id="count-agent-qoder">0</span>
+        </div>
+        <div class="nav-item" onclick="setAgent('codebuddy')" id="agent-codebuddy">
+          <span>CodeBuddy (审查归档)</span>
+          <span class="count" id="count-agent-codebuddy">0</span>
+        </div>
       </div>
 
       <div class="sidebar-section">
@@ -503,18 +515,28 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     function updateCounts() {
       let active = 0, pinned = 0, archived = 0, trash = 0;
+      let cAll = 0, cAgy = 0, cQoder = 0, cCb = 0;
       allSessions.forEach(s => {
         if (s.deleted) trash++;
         else if (s.archived) archived++;
         else {
           active++;
           if (s.pinned) pinned++;
+          cAll++;
+          const a = (s.agent || '').toLowerCase();
+          if (a === 'agy') cAgy++;
+          else if (a === 'qoder') cQoder++;
+          else if (a.includes('buddy')) cCb++;
         }
       });
       document.getElementById('count-active').innerText = active;
       document.getElementById('count-pinned').innerText = pinned;
       document.getElementById('count-archived').innerText = archived;
       document.getElementById('count-trash').innerText = trash;
+      if (document.getElementById('count-agent-all')) document.getElementById('count-agent-all').innerText = cAll;
+      if (document.getElementById('count-agent-agy')) document.getElementById('count-agent-agy').innerText = cAgy;
+      if (document.getElementById('count-agent-qoder')) document.getElementById('count-agent-qoder').innerText = cQoder;
+      if (document.getElementById('count-agent-codebuddy')) document.getElementById('count-agent-codebuddy').innerText = cCb;
     }
 
     function renderWorkspaces() {
@@ -578,8 +600,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
           if (!s.deleted) return false;
         }
 
-        // Agent 过滤
-        if (currentAgent !== 'all' && s.agent !== currentAgent) return false;
+        // Agent 过滤 (大小写不敏感匹配)
+        if (currentAgent !== 'all') {
+          const sAgentLower = (s.agent || '').toLowerCase();
+          const targetLower = currentAgent.toLowerCase();
+          if (targetLower === 'codebuddy') {
+            if (!sAgentLower.includes('buddy')) return false;
+          } else {
+            if (sAgentLower !== targetLower) return false;
+          }
+        }
         // 工作区过滤
         if (currentWs !== 'all' && s.ws !== currentWs) return false;
         // 标签过滤
