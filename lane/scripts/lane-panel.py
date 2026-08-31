@@ -61,11 +61,15 @@ def get_all_sessions_data(lv, mgr):
         for t in tags:
             all_tags.add(t)
 
+        size_bytes = s.get("size_bytes", 0)
+        size_str = s.get("size_str", "-")
         is_noisy = lv.is_noisy_session(s["title"])
         out.append({
             "sid": sid,
             "agent": s["agent"],
             "ws": s["ws"],
+            "size_bytes": size_bytes,
+            "size_str": size_str,
             "title": custom_title or s["title"],
             "raw_title": s["title"],
             "has_custom_title": bool(custom_title),
@@ -442,11 +446,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <thead>
             <tr>
               <th width="40"></th>
-              <th width="110">Agent</th>
-              <th width="140">工作空间</th>
+              <th width="100">Agent</th>
+              <th width="130">工作空间</th>
+              <th width="85">体积</th>
               <th>标题 / 主题</th>
-              <th width="160">修改时间</th>
-              <th width="160" style="text-align: right;">操作</th>
+              <th width="150">修改时间</th>
+              <th width="150" style="text-align: right;">操作</th>
             </tr>
           </thead>
           <tbody id="session-tbody"></tbody>
@@ -609,6 +614,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <td><input type="checkbox" onchange="toggleSelect('${s.sid}')" ${isChecked}></td>
             <td>${agentBadge}</td>
             <td><span class="badge badge-ws">${s.ws}</span></td>
+            <td><span style="color: var(--text-muted); font-size: 12px; font-family: monospace;">${s.size_str}</span></td>
             <td>
               <div class="title-cell" id="title-container-${s.sid}">
                 <span class="title-text" onclick="previewSession('${s.sid}')">${s.pinned ? '⭐ ' : ''}${escapeHtml(s.title)}</span>
@@ -762,7 +768,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       currentDrawerWs = s.ws;
 
       document.getElementById('drawer-title').innerText = s.title;
-      document.getElementById('drawer-meta').innerText = `Agent: [${s.agent}] | 工作空间: ${s.ws} | ID: ${s.sid}`;
+      document.getElementById('drawer-meta').innerText = `Agent: [${s.agent}] | 工作空间: ${s.ws} | 体积: ${s.size_str} | ID: ${s.sid}`;
       document.getElementById('drawer-content').innerText = "正在读取详情与对话流...";
       document.getElementById('drawer').classList.add('open');
 

@@ -73,6 +73,17 @@ def is_noisy_session(title):
     return False
 
 
+def format_size(bytes_val):
+    if bytes_val is None or bytes_val < 0:
+        return "-"
+    if bytes_val < 1024:
+        return f"{bytes_val}B"
+    elif bytes_val < 1024 * 1024:
+        return f"{bytes_val / 1024:.1f}KB"
+    else:
+        return f"{bytes_val / (1024 * 1024):.1f}MB"
+
+
 def extract_qoder_title(events):
     title = next((e.get("aiTitle") or "" for e in events if e.get("type") == "ai-title"), "")
     if title:
@@ -169,11 +180,14 @@ def get_agy_sessions(agy_mod, grep=None, ws_filter=None, show_all=False):
         if kw:
             if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not agy_mod.db_contains_keyword(p, grep):
                 continue
+        size_bytes = os.path.getsize(p) if os.path.isfile(p) else 0
         res.append({
             "agent": "agy",
             "mtime": mtime,
             "ts": ts,
             "ws": ws,
+            "size_bytes": size_bytes,
+            "size_str": format_size(size_bytes),
             "title": title,
             "sid": sid,
             "path": p
@@ -203,11 +217,14 @@ def get_qoder_sessions(qoder_mod, grep=None, ws_filter=None, show_all=False):
         if kw:
             if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not qoder_mod.file_contains_keyword(p, grep):
                 continue
+        size_bytes = os.path.getsize(p) if os.path.isfile(p) else 0
         res.append({
             "agent": "qoder",
             "mtime": mtime,
             "ts": ts,
             "ws": ws,
+            "size_bytes": size_bytes,
+            "size_str": format_size(size_bytes),
             "title": title,
             "sid": sid,
             "path": p
@@ -237,11 +254,14 @@ def get_cb_sessions(cb_mod, grep=None, ws_filter=None, show_all=False):
         if kw:
             if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not cb_mod.file_contains_keyword(p, grep):
                 continue
+        size_bytes = os.path.getsize(p) if os.path.isfile(p) else 0
         res.append({
             "agent": "CodeBuddy",
             "mtime": mtime,
             "ts": ts,
             "ws": ws,
+            "size_bytes": size_bytes,
+            "size_str": format_size(size_bytes),
             "title": title,
             "sid": sid,
             "path": p
@@ -384,14 +404,14 @@ def main():
     total_count = len(enriched)
     display_sessions = enriched[:args.limit]
 
-    print(f"{'修改时间':<17} {'Agent':<12} {'工作空间':<22} {'标题/主题':<36} 会话ID")
-    print("-" * 125)
+    print(f"{'修改时间':<17} {'Agent':<12} {'工作空间':<18} {'体积':<9} {'标题/主题':<36} 会话ID")
+    print("-" * 132)
     for s in display_sessions:
         agent_tag = f"[{s['agent']}]"
         pin_prefix = "⭐ " if s["pinned"] else ""
         tag_suffix = " " + "".join(f"[{t}]" for t in s["tags"]) if s["tags"] else ""
         display_title = pin_prefix + s["title"] + tag_suffix
-        print(f"{s['ts']:<17} {agent_tag:<12} {s['ws'][:22]:<22} {display_title[:36]:<36} {s['sid']}")
+        print(f"{s['ts']:<17} {agent_tag:<12} {s['ws'][:18]:<18} {s['size_str']:<9} {display_title[:36]:<36} {s['sid']}")
     
     hint = "（已自动过滤空会话/指令/归档/回收站，可用 -A 查看全部）" if not (args.all or args.trash or args.archived) else ""
     if total_count > args.limit:
