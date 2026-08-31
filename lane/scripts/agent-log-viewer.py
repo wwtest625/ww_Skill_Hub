@@ -317,6 +317,8 @@ def main():
     p.add_argument("--archived", action="store_true", help="仅查看已归档的会话")
     p.add_argument("-a", "--agent", choices=["agy", "qoder", "codebuddy", "all"], default="all",
                    help="筛选特定 agent 的会话")
+    p.add_argument("-S", "--sort", choices=["time", "time-asc", "size", "size-asc"], default="time",
+                   help="排序方式: time(默认时间降序), time-asc(时间升序), size(体积降序), size-asc(体积升序)")
     p.add_argument("-T", "--no-thinking", action="store_true", help="agy 会话跳过思考流")
     args = p.parse_args()
 
@@ -392,8 +394,15 @@ def main():
 
         enriched.append(s)
 
-    # 排序：置顶在前，其余按修改时间倒序
-    enriched.sort(key=lambda x: (not x["pinned"], -x["mtime"]))
+    # 排序：置顶在前，其余按用户指定规则排序
+    if args.sort == "size":
+        enriched.sort(key=lambda x: (not x["pinned"], -x.get("size_bytes", 0)))
+    elif args.sort == "size-asc":
+        enriched.sort(key=lambda x: (not x["pinned"], x.get("size_bytes", 0)))
+    elif args.sort == "time-asc":
+        enriched.sort(key=lambda x: (not x["pinned"], x["mtime"]))
+    else:  # time
+        enriched.sort(key=lambda x: (not x["pinned"], -x["mtime"]))
 
     if not enriched:
         status_name = "回收站中" if args.trash else ("已归档" if args.archived else "有效")

@@ -461,9 +461,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
               <th width="40"></th>
               <th width="100">Agent</th>
               <th width="130">工作空间</th>
-              <th width="85">体积</th>
+              <th width="95" style="cursor:pointer; user-select:none;" onclick="toggleSort('size')" title="点击切换体积排序 (升序/降序)">
+                体积 <span id="sort-icon-size" style="font-size:11px; color:var(--text-muted);">↕</span>
+              </th>
               <th>标题 / 主题</th>
-              <th width="150">修改时间</th>
+              <th width="155" style="cursor:pointer; user-select:none;" onclick="toggleSort('time')" title="点击切换时间排序 (升序/降序)">
+                修改时间 <span id="sort-icon-time" style="font-size:11px; color:var(--primary);">▼</span>
+              </th>
               <th width="150" style="text-align: right;">操作</th>
             </tr>
           </thead>
@@ -498,6 +502,30 @@ HTML_PAGE = r"""<!DOCTYPE html>
     let currentDrawerSid = null;
     let currentDrawerAgent = null;
     let currentDrawerWs = null;
+    let currentSortField = 'time';
+    let currentSortOrder = 'desc';
+
+    function toggleSort(field) {
+      if (currentSortField === field) {
+        currentSortOrder = currentSortOrder === 'desc' ? 'asc' : 'desc';
+      } else {
+        currentSortField = field;
+        currentSortOrder = 'desc';
+      }
+      updateSortIcons();
+      renderTable();
+    }
+
+    function updateSortIcons() {
+      const iconTime = document.getElementById('sort-icon-time');
+      const iconSize = document.getElementById('sort-icon-size');
+      if (iconTime && iconSize) {
+        iconTime.innerText = currentSortField === 'time' ? (currentSortOrder === 'desc' ? '▼' : '▲') : '↕';
+        iconTime.style.color = currentSortField === 'time' ? 'var(--primary)' : 'var(--text-muted)';
+        iconSize.innerText = currentSortField === 'size' ? (currentSortOrder === 'desc' ? '▼' : '▲') : '↕';
+        iconSize.style.color = currentSortField === 'size' ? 'var(--primary)' : 'var(--text-muted)';
+      }
+    }
 
     async function fetchData() {
       try {
@@ -623,6 +651,19 @@ HTML_PAGE = r"""<!DOCTYPE html>
           if (!matchTitle && !matchSid && !matchTag) return false;
         }
         return true;
+      });
+
+      filtered.sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        if (currentSortField === 'size') {
+          const valA = a.size_bytes || 0;
+          const valB = b.size_bytes || 0;
+          return currentSortOrder === 'desc' ? valB - valA : valA - valB;
+        } else {
+          const valA = a.mtime || 0;
+          const valB = b.mtime || 0;
+          return currentSortOrder === 'desc' ? valB - valA : valA - valB;
+        }
       });
 
       currentFiltered = filtered;
