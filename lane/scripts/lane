@@ -2,7 +2,7 @@
 """Lane CLI (泳道模式 - 跨 Agent 协同总线)
 
 用法:
-  # 1. 极简快捷派活（自动注入到目标 Agent 最新会话）
+  # 1. 跨泳道派活（自动注入到目标 Agent 最新会话）
   lane qoder "我是 agy，已写好后端，请进行前端 UI 测试"
   lane codebuddy "请对 /root/demo.py 进行代码审查"
   lane agy "继续排查内存泄漏问题"
@@ -11,12 +11,30 @@
   lane inject --to qoder --session <ID> --intent "UI测试" --msg "任务说明"
   lane inject --to codebuddy --new --intent "新建任务" --msg "任务说明"
 
-  # 3. 泳道多 Agent 会话日志与全局检索
-  lane log                     # 查看最近会话（跨 agy / qoder / CodeBuddy 泳道）
-  lane log -g "关键词"          # 全局关键词搜索所有泳道
+  # 3. 会话查看与全局检索
+  lane                         # 查看最近有效会话
+  lane -w metax-workbench      # 按工作空间筛选
+  lane -t GPU                  # 按标签筛选
+  lane -g "关键词"              # 全局跨 Agent 搜索
+  lane -A                      # 查看全量会话（包含空会话/控制指令）
+  lane --trash                 # 查看回收站中的会话
+  lane --archived              # 查看已归档会话
   lane view <会话ID> [-s]      # 查看指定会话详情 / 摘要
 
-  # 4. 终端接管提示
+  # 4. 会话管理（删除/重命名/打标/归档/清理）
+  lane rename <ID> "新标题"     # 重命名会话
+  lane tag <ID> add "GPU"      # 添加标签
+  lane tag <ID> rm "废弃"      # 移除标签
+  lane pin <ID> [--off]        # 置顶 / 取消置顶
+  lane archive <ID> [--off]    # 归档 / 取消归档
+  lane rm <ID> [-f]            # 移入回收站 (加 -f 彻底销毁底层文件)
+  lane restore <ID>            # 从回收站还原
+  lane clean --empty [--dry-run] # 扫描并清理空会话与控制指令残留
+
+  # 5. 轻量可视化管理面板
+  lane panel [--port 3457]     # 启动 Web 控制面板
+
+  # 6. 终端接管提示
   lane resume qoder [ID]       # 快捷唤起/接管命令提示
 """
 import sys
@@ -26,11 +44,12 @@ import subprocess
 
 AGENT_INJECT = "/root/agent-inject.py"
 AGENT_LOG_VIEWER = "/root/agent-log-viewer.py"
+AGENT_MANAGER = "/root/agent-manager.py"
+LANE_PANEL = "/root/lane-panel.py"
 
 
 def main():
     if len(sys.argv) == 1:
-        # 无参默认等同于查看最近泳道日志
         subprocess.run(["python3", AGENT_LOG_VIEWER, "-n", "20"])
         return
 
@@ -47,7 +66,7 @@ def main():
             "python3", AGENT_INJECT,
             "--to", agent,
             "--latest",
-            "--from", "agy",
+            "--from-agent", "agy",
             "--msg", msg
         ]
         subprocess.run(cmd)
@@ -74,6 +93,48 @@ def main():
         subprocess.run(cmd)
         return
 
+    # 会话管理命令转发
+    if first_arg in ("rename", "mv"):
+        cmd = ["python3", AGENT_MANAGER, "rename"] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    if first_arg in ("tag", "tags"):
+        cmd = ["python3", AGENT_MANAGER, "tag"] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    if first_arg == "pin":
+        cmd = ["python3", AGENT_MANAGER, "pin"] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    if first_arg in ("archive", "arc"):
+        cmd = ["python3", AGENT_MANAGER, "archive"] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    if first_arg in ("rm", "del", "delete"):
+        cmd = ["python3", AGENT_MANAGER, "rm"] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    if first_arg in ("restore", "undo"):
+        cmd = ["python3", AGENT_MANAGER, "restore"] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    if first_arg in ("clean", "cleanup", "gc"):
+        cmd = ["python3", AGENT_MANAGER, "clean"] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    # 可视化面板
+    if first_arg in ("panel", "ui", "web", "dash", "dashboard"):
+        cmd = ["python3", LANE_PANEL] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
     # 快捷接管：lane resume <agent> [id]
     if first_arg in ("resume", "-r"):
         if len(sys.argv) < 3:
@@ -89,7 +150,7 @@ def main():
             print(f"👉 运行命令接管: `agy --conversation {sid}`" if sid else "👉 运行命令接管: `agy -c`")
         return
 
-    # 默认传递给 log-viewer 进行单 ID 或参数查询
+    # 默认传递给 log-viewer 进行查询或参数过滤
     cmd = ["python3", AGENT_LOG_VIEWER] + sys.argv[1:]
     subprocess.run(cmd)
 

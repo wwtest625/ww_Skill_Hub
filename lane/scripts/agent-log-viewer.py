@@ -116,8 +116,19 @@ def extract_cb_title(events):
     return "(空会话)"
 
 
+def load_lane_meta():
+    meta_path = "/root/.agent/lane-meta.json"
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
 def get_agy_sessions(agy_mod, grep=None, ws_filter=None, show_all=False):
-    files = glob.glob(os.path.join(AGY_CONV_DIR, "*.db"))
+    files = [p for p in glob.glob(os.path.join(AGY_CONV_DIR, "*.db")) if not p.endswith("conversation_summaries.db")]
     sums = agy_mod.load_summaries()
     res = []
     kw = grep.lower() if grep else None
@@ -279,8 +290,11 @@ def main():
     p.add_argument("-s", "--summary", action="store_true", help="摘要模式")
     p.add_argument("-g", "--grep", metavar="关键词", help="全局搜索或对话内过滤关键词")
     p.add_argument("-w", "--workspace", metavar="工作区", help="按工作区/项目名筛选 (如 metax-workbench)")
+    p.add_argument("-t", "--tag", metavar="标签", help="按标签筛选 (如 GPU, 归档)")
     p.add_argument("-n", "--limit", type=int, default=25, help="列表最大显示数量 (默认 25)")
-    p.add_argument("-A", "--all", action="store_true", help="显示全部会话（包含空会话与控制指令）")
+    p.add_argument("-A", "--all", action="store_true", help="显示全部会话（包含空会话、指令、归档与回收站）")
+    p.add_argument("--trash", action="store_true", help="仅查看回收站中的会话")
+    p.add_argument("--archived", action="store_true", help="仅查看已归档的会话")
     p.add_argument("-a", "--agent", choices=["agy", "qoder", "codebuddy", "all"], default="all",
                    help="筛选特定 agent 的会话")
     p.add_argument("-T", "--no-thinking", action="store_true", help="agy 会话跳过思考流")
@@ -314,42 +328,76 @@ def main():
     agy_mod = load_module_from_file("agy_mod", "/root/agy-log-viewer.py")
     qoder_mod = load_module_from_file("qoder_mod", "/root/qoder-log-viewer.py")
     cb_mod = load_module_from_file("cb_mod", "/root/codebuddy-log-viewer.py")
+    meta = load_lane_meta()
 
     all_sessions = []
+    show_raw = args.all or args.trash or args.archived
     if args.agent in ("all", "agy"):
-        all_sessions.extend(get_agy_sessions(agy_mod, grep=args.grep, ws_filter=args.workspace, show_all=args.all))
+        all_sessions.extend(get_agy_sessions(agy_mod, grep=args.grep, ws_filter=args.workspace, show_all=show_raw))
     if args.agent in ("all", "qoder"):
-        all_sessions.extend(get_qoder_sessions(qoder_mod, grep=args.grep, ws_filter=args.workspace, show_all=args.all))
+        all_sessions.extend(get_qoder_sessions(qoder_mod, grep=args.grep, ws_filter=args.workspace, show_all=show_raw))
     if args.agent in ("all", "codebuddy"):
-        all_sessions.extend(get_cb_sessions(cb_mod, grep=args.grep, ws_filter=args.workspace, show_all=args.all))
+        all_sessions.extend(get_cb_sessions(cb_mod, grep=args.grep, ws_filter=args.workspace, show_all=show_raw))
 
-    all_sessions.sort(key=lambda x: x["mtime"], reverse=True)
+    # 应用增强元数据
+    enriched = []
+    for s in all_sessions:
+        m = meta.get(s["sid"], {})
+        if m.get("title"):
+            s["title"] = m["title"]
+        s["tags"] = m.get("tags", [])
+        s["pinned"] = m.get("pinned", False)
+        s["archived"] = m.get("archived", False)
+        s["deleted"] = m.get("deleted", False)
 
-    if not all_sessions:
-        msg = "未找到任何有效会话记录"
-        if args.grep and args.workspace:
-            msg = f"未找到匹配关键词 '{args.grep}' 且工作区包含 '{args.workspace}' 的会话记录"
-        elif args.grep:
-            msg = f"未找到包含关键词 '{args.grep}' 的任何会话记录"
-        elif args.workspace:
-            msg = f"未找到工作区包含 '{args.workspace}' 的任何会话记录"
+        # 状态过滤
+        if args.trash:
+            if not s["deleted"]:
+                continue
+        elif not args.all:
+            if s["deleted"]:
+                continue
+            if args.archived:
+                if not s["archived"]:
+                    continue
+            else:
+                if s["archived"]:
+                    continue
+
+        # 标签过滤
+        if args.tag:
+            tag_kw = args.tag.lower()
+            if not any(tag_kw in t.lower() for t in s["tags"]):
+                continue
+
+        enriched.append(s)
+
+    # 排序：置顶在前，其余按修改时间倒序
+    enriched.sort(key=lambda x: (not x["pinned"], -x["mtime"]))
+
+    if not enriched:
+        status_name = "回收站中" if args.trash else ("已归档" if args.archived else "有效")
+        msg = f"未找到任何{status_name}会话记录"
         print(msg)
         return
 
-    total_count = len(all_sessions)
-    display_sessions = all_sessions[:args.limit]
+    total_count = len(enriched)
+    display_sessions = enriched[:args.limit]
 
     print(f"{'修改时间':<17} {'Agent':<12} {'工作空间':<22} {'标题/主题':<36} 会话ID")
     print("-" * 125)
     for s in display_sessions:
         agent_tag = f"[{s['agent']}]"
-        print(f"{s['ts']:<17} {agent_tag:<12} {s['ws'][:22]:<22} {s['title'][:36]:<36} {s['sid']}")
+        pin_prefix = "⭐ " if s["pinned"] else ""
+        tag_suffix = " " + "".join(f"[{t}]" for t in s["tags"]) if s["tags"] else ""
+        display_title = pin_prefix + s["title"] + tag_suffix
+        print(f"{s['ts']:<17} {agent_tag:<12} {s['ws'][:22]:<22} {display_title[:36]:<36} {s['sid']}")
     
-    hint = "（已自动过滤空会话/指令，可用 -A 查看全部）" if not args.all else ""
+    hint = "（已自动过滤空会话/指令/归档/回收站，可用 -A 查看全部）" if not (args.all or args.trash or args.archived) else ""
     if total_count > args.limit:
-        print(f"\n共 {total_count} 条有效记录，已展示前 {args.limit} 条（可用 -n <数字> 查看更多）{hint}。")
+        print(f"\n共 {total_count} 条记录，已展示前 {args.limit} 条（可用 -n <数字> 查看更多）{hint}。")
     elif hint:
-        print(f"\n共 {total_count} 条有效记录 {hint}。")
+        print(f"\n共 {total_count} 条记录 {hint}。")
 
 
 if __name__ == "__main__":

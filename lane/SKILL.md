@@ -1,12 +1,12 @@
 ---
 name: lane
-version: 2.1.0
-display_name: "Lane（三 Agent 泳道协同）"
-description: Lane（泳道模式）——三 Agent（agy / qoder / CodeBuddy）异构协同总线：跨 Agent 会话注入、多工作区会话查看、共享基建与避坑规范。触发词：lane、泳道、协作、会话记录、查看记录、会话注入、另一个agent、互通、handoff、黑板
-keywords: lane,泳道,协作,会话注入,agent-inject,qoder,agy,antigravity,codebuddy,会话记录,log-viewer,agent-log-viewer,工作区,互通,分工,handoff,黑板,xssh,GPU
+version: 2.2.0
+display_name: "Lane（三 Agent 泳道协同与会话管理）"
+description: Lane（泳道模式）——三 Agent（agy / qoder / CodeBuddy）异构协同总线：跨 Agent 会话注入、多工作区会话查看、会话管理（改名/打标/清理/回收站）、轻量 Web 控制面板、共享基建与避坑规范。触发词：lane、泳道、协作、会话记录、查看记录、会话注入、另一个agent、互通、handoff、黑板、面板、会话管理、清理会话
+keywords: lane,泳道,协作,会话注入,agent-inject,qoder,agy,antigravity,codebuddy,会话记录,log-viewer,agent-log-viewer,工作区,互通,分工,handoff,黑板,xssh,GPU,会话管理,panel,改名,打标签,清理
 ---
 
-# 🏊‍♂️ Lane —— 三 Agent 泳道协同手册
+# 🏊‍♂️ Lane —— 三 Agent 泳道协同与会话管理手册
 
 ## 一、 泳道分工
 
@@ -36,15 +36,36 @@ lane inject --to codebuddy --new --intent "新建审查" --msg "任务说明"
 
 ### 3. 多泳道看板（跨 Agent 查看与检索）
 ```bash
-lane                         # 查看最近有效会话（默认自动过滤空会话/指令）
+lane                         # 查看最近有效会话（默认自动过滤空会话/指令/归档/回收站）
 lane -w metax-workbench      # 按项目工作区筛选
+lane -t GPU                  # 按标签筛选
 lane -a qoder                # 仅看指定 Agent
 lane -g "关键词"              # 全局跨 Agent 搜索
-lane -A                      # 查看全量会话（包含空会话/控制指令）
+lane -A                      # 查看全量会话（包含空会话/控制指令/归档/回收站）
+lane --trash                 # 查看回收站会话
+lane --archived              # 查看已归档会话
 lane view <会话ID> [-s]      # 查看指定会话对话流或摘要 (-s)
 ```
 
-### 4. 人工现场接管
+### 4. 会话管理（改名 / 归类 / 垃圾清理 / 回收站）
+```bash
+lane rename <ID> "新标题"     # 重命名会话（覆盖原生标题）
+lane tag <ID> add "GPU"      # 给会话打标签/分类
+lane tag <ID> rm "废弃"      # 移除标签
+lane pin <ID> [--off]        # 🌟 置顶 / 取消置顶
+lane archive <ID> [--off]    # 📦 归档 / 取消归档（移出默认列表）
+lane rm <ID> [-f]            # 🗑️ 移入回收站（加 -f 物理粉碎底层文件）
+lane restore <ID>            # ↩️ 从回收站还原会话
+lane clean --empty [--dry-run] # 🧹 批量扫描并清理空会话与控制指令残留
+```
+
+### 5. 轻量级 Web 控制面板（零外部依赖）
+```bash
+lane panel [--port 3457]     # 启动可视化控制台 (http://localhost:3457)
+```
+- 支持批量选择删除、行内修改标题、一键添加标签、右侧抽屉式查看对话历史、一键复制接管命令。
+
+### 6. 人工现场接管
 ```bash
 lane resume qoder [ID]       # 智能提示带工作区参数的接管命令
 ```
