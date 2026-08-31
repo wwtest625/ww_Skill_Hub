@@ -437,6 +437,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <input type="checkbox" id="select-all" onclick="toggleSelectAll()">
           <span id="selected-hint">已选 0 项</span>
           <button class="btn btn-danger" id="btn-batch-del" style="display:none;" onclick="batchDelete()">批量删除</button>
+          <button class="btn btn-danger" id="btn-empty-trash" style="display:none;" onclick="emptyAllTrash()">🔥 清空回收站</button>
         </div>
         <div id="stats-info" style="color: var(--text-muted);">正在加载数据...</div>
       </div>
@@ -535,6 +536,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     function setTab(tab) {
       currentTab = tab;
+      selectedSids.clear();
+      if (document.getElementById('select-all')) document.getElementById('select-all').checked = false;
+      updateSelectedBar();
       document.querySelectorAll('.sidebar-section:first-child .nav-item').forEach(el => el.classList.remove('active'));
       document.getElementById('tab-' + tab).classList.add('active');
       renderTable();
@@ -591,6 +595,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         return true;
       });
 
+      currentFiltered = filtered;
       document.getElementById('stats-info').innerText = `共匹配到 ${filtered.length} 条记录`;
 
       const tbody = document.getElementById('session-tbody');
@@ -646,6 +651,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
       return str.replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
     }
 
+    let currentFiltered = [];
+
     function toggleSelect(sid) {
       if (selectedSids.has(sid)) selectedSids.delete(sid);
       else selectedSids.add(sid);
@@ -654,7 +661,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     function toggleSelectAll() {
       const chk = document.getElementById('select-all').checked;
-      allSessions.forEach(s => {
+      currentFiltered.forEach(s => {
         if (chk) selectedSids.add(s.sid);
         else selectedSids.delete(s.sid);
       });
@@ -664,8 +671,17 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     function updateSelectedBar() {
       const count = selectedSids.size;
+      const isTrash = currentTab === 'trash';
       document.getElementById('selected-hint').innerText = `已选 ${count} 项`;
-      document.getElementById('btn-batch-del').style.display = count > 0 ? 'inline-flex' : 'none';
+      const btnDel = document.getElementById('btn-batch-del');
+      btnDel.style.display = count > 0 ? 'inline-flex' : 'none';
+      btnDel.innerText = isTrash ? `🔥 彻底粉碎选中 (${count})` : `🗑️ 批量移入回收站 (${count})`;
+
+      const btnEmpty = document.getElementById('btn-empty-trash');
+      if (btnEmpty) {
+        const trashCount = parseInt(document.getElementById('count-trash').innerText || '0');
+        btnEmpty.style.display = (isTrash && trashCount > 0) ? 'inline-flex' : 'none';
+      }
     }
 
     // 操作 API
@@ -721,7 +737,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     async function deleteSession(sid, force) {
-      const confirmMsg = force ? "确定彻底粉碎该会话底层文件吗？不可撤销！" : "移入回收站？";
+      const confirmMsg = force ? "确定彻底物理粉碎该会话底层文件吗？不可撤销！" : "移入回收站？";
       if (!confirm(confirmMsg)) return;
       await fetch('/api/delete', {
         method: 'POST',
@@ -733,14 +749,29 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     async function batchDelete() {
-      if (!confirm(`确定将选中的 ${selectedSids.size} 个会话移入回收站吗？`)) return;
+      const isTrash = currentTab === 'trash';
+      const confirmMsg = isTrash
+        ? `【高危操作】确定彻底物理粉碎选中的 ${selectedSids.size} 个会话吗？底层数据库/JSONL 将被彻底抹除且不可恢复！`
+        : `确定将选中的 ${selectedSids.size} 个会话移入回收站吗？`;
+      if (!confirm(confirmMsg)) return;
       await fetch('/api/batch-delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: Array.from(selectedSids), force: false })
+        body: JSON.stringify({ ids: Array.from(selectedSids), force: isTrash })
       });
       selectedSids.clear();
+      if (document.getElementById('select-all')) document.getElementById('select-all').checked = false;
       updateSelectedBar();
+      fetchData();
+    }
+
+    async function emptyAllTrash() {
+      if (!confirm("【高危操作】确定清空回收站中所有的会话吗？所有放入回收站的文件将被彻底物理粉碎！")) return;
+      const res = await fetch('/api/empty-trash', { method: 'POST' });
+      const data = await res.json();
+      alert(`回收站已清空！共物理销毁 ${data.cleaned} 个会话。`);
+      selectedSids.clear();
+      if (document.getElementById('select-all')) document.getElementById('select-all').checked = false;
       fetchData();
     }
 
@@ -893,6 +924,11 @@ class LanePanelHandler(BaseHTTPRequestHandler):
         if path == "/api/clean-empty":
             cleaned = mgr.clean_empty_sessions(force=False)
             self.send_json({"ok": True, "cleaned_count": cleaned})
+            return
+
+        if path == "/api/empty-trash":
+            cleaned = mgr.clean_trash_sessions(dry_run=False)
+            self.send_json({"ok": True, "cleaned": cleaned})
             return
 
         self.send_response(404)

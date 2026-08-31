@@ -261,6 +261,27 @@ def clean_empty_sessions(dry_run=False, force=False):
     return cleaned_count
 
 
+def clean_trash_sessions(dry_run=False):
+    """一键清空回收站：彻底物理销毁所有处于 deleted 状态的会话及其底层文件"""
+    meta = load_meta()
+    trash_sids = [sid for sid, data in meta.items() if data.get("deleted")]
+    if not trash_sids:
+        print("[*] 回收站为空，没有需要清理的会话。")
+        return 0
+    print(f"[*] 回收站中共有 {len(trash_sids)} 个会话待彻底销毁:")
+    for sid in trash_sids:
+        print(f"  - ID: {sid} | 标题: {meta[sid].get('title', '-')}")
+    if dry_run:
+        print("[*] 预览模式，未执行物理删除。去掉 --dry-run 即可彻底粉碎。")
+        return len(trash_sids)
+    cleaned = 0
+    for sid in trash_sids:
+        delete_session(sid, force=True)
+        cleaned += 1
+    print(f"[+] 回收站已彻底清空！共物理销毁 {cleaned} 个会话。")
+    return cleaned
+
+
 def main():
     p = argparse.ArgumentParser(description="Lane 会话管理内核工具")
     sub = p.add_subparsers(dest="cmd", help="子命令")
@@ -291,6 +312,7 @@ def main():
 
     p_clean = sub.add_parser("clean", help="批量清道夫")
     p_clean.add_argument("--empty", action="store_true", help="扫描并清理所有空会话与控制指令残留")
+    p_clean.add_argument("--trash", action="store_true", help="一键清空回收站（彻底物理销毁所有软删除会话）")
     p_clean.add_argument("--dry-run", action="store_true", help="仅预览待清理清单，不实际删除")
     p_clean.add_argument("-f", "--force", action="store_true", help="彻底物理删除，而非软删除")
 
@@ -316,7 +338,9 @@ def main():
     elif args.cmd == "restore":
         restore_session(args.session)
     elif args.cmd == "clean":
-        if args.empty:
+        if args.trash:
+            clean_trash_sessions(dry_run=args.dry_run)
+        elif args.empty:
             clean_empty_sessions(dry_run=args.dry_run, force=args.force)
         else:
             p.print_help()
