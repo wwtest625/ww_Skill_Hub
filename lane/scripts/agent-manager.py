@@ -20,6 +20,7 @@ AGY_CONV_DIR = "/root/.gemini/antigravity-cli/conversations"
 AGY_SUMMARY_DB = "/root/.gemini/antigravity-cli/conversation_summaries.db"
 QODER_PROJ_DIR = "/root/.qoder/projects"
 CB_PROJ_DIR = "/root/.codebuddy/projects"
+CLINE_DATA_DIR = "/root/.cline/data"
 
 
 def load_meta():
@@ -49,8 +50,9 @@ def resolve_session(session_arg):
     agy_files = [p for p in glob.glob(os.path.join(AGY_CONV_DIR, "*.db")) if sid_clean in os.path.basename(p)]
     qoder_files = [p for p in glob.glob(os.path.join(QODER_PROJ_DIR, "*", "*.jsonl")) if sid_clean in os.path.basename(p)]
     cb_files = [p for p in glob.glob(os.path.join(CB_PROJ_DIR, "*", "*.jsonl")) if sid_clean in os.path.basename(p)]
+    cline_files = [p for p in glob.glob(os.path.join(CLINE_DATA_DIR, "sessions", "*", "*.messages.json")) if sid_clean in os.path.basename(os.path.dirname(p))]
 
-    total = len(agy_files) + len(qoder_files) + len(cb_files)
+    total = len(agy_files) + len(qoder_files) + len(cb_files) + len(cline_files)
     if total == 0:
         return None, None, None
     if total > 1:
@@ -66,6 +68,10 @@ def resolve_session(session_arg):
     elif cb_files:
         p = cb_files[0]
         return "codebuddy", os.path.basename(p)[:-6], p
+    elif cline_files:
+        p = cline_files[0]
+        sid = os.path.basename(os.path.dirname(p))
+        return "cline", sid, p
 
     return None, None, None
 
@@ -185,6 +191,22 @@ def delete_session(sid, force=False):
             if os.path.isfile(m):
                 os.remove(m)
                 deleted_items.append(m)
+    elif agent == "cline":
+        session_dir = os.path.join(CLINE_DATA_DIR, "sessions", full_sid)
+        if os.path.isdir(session_dir):
+            import shutil
+            shutil.rmtree(session_dir, ignore_errors=True)
+            deleted_items.append(session_dir)
+        db_path = os.path.join(CLINE_DATA_DIR, "db", "sessions.db")
+        if os.path.isfile(db_path):
+            try:
+                conn = sqlite3.connect(db_path)
+                conn.execute("DELETE FROM sessions WHERE session_id=?", (full_sid,))
+                conn.commit()
+                conn.close()
+                deleted_items.append("sessions.db")
+            except Exception:
+                pass
 
     if full_sid in meta:
         del meta[full_sid]
@@ -220,11 +242,13 @@ def clean_empty_sessions(dry_run=False, force=False):
     agy_mod = lv.load_module_from_file("agy_mod", "/root/agy-log-viewer.py")
     qoder_mod = lv.load_module_from_file("qoder_mod", "/root/qoder-log-viewer.py")
     cb_mod = lv.load_module_from_file("cb_mod", "/root/codebuddy-log-viewer.py")
+    cline_mod = lv.load_module_from_file("cline_mod", "/root/cline-log-viewer.py")
 
     all_sessions = []
     all_sessions.extend(lv.get_agy_sessions(agy_mod, show_all=True))
     all_sessions.extend(lv.get_qoder_sessions(qoder_mod, show_all=True))
     all_sessions.extend(lv.get_cb_sessions(cb_mod, show_all=True))
+    all_sessions.extend(lv.get_cline_sessions(cline_mod, show_all=True))
 
     meta = load_meta()
     noisy_list = []

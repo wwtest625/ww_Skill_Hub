@@ -28,6 +28,37 @@ AGY_CONV_DIR = "/root/.gemini/antigravity-cli/conversations"
 QODER_PROJ_DIR = "/root/.qoder/projects"
 CB_PROJ_DIR = "/root/.codebuddy/projects"
 
+# ============ Agent 元信息（技能管理 / Agent.md 管理） ============
+# agent: { 名称, skills_dir 技能根目录, agent_md 专属 Agent.md, fallback_md 兜底全局规范 }
+AGENTS = {
+    "agy": {
+        "name": "agy (架构研发)",
+        "skills_dir": "/root/.gemini/antigravity-cli/skills",
+        "agent_md": "/root/.gemini/config/AGENTS.md",
+    },
+    "qoder": {
+        "name": "qoder (前端交互)",
+        "skills_dir": "/root/.qoder/skills",
+        "agent_md": "/root/.qoder/AGENTS.md",
+    },
+    "codebuddy": {
+        "name": "CodeBuddy (审查归档)",
+        "skills_dir": "/root/.codebuddy/skills",
+        "agent_md": "/root/.codebuddy/AGENTS.md",
+        "fallback_md": "/root/AGENT.md",
+    },
+    "cline": {
+        "name": "Cline (全能执行)",
+        "skills_dir": "/root/.cline/skills",
+        "agent_md": "/root/.cline/AGENTS.md",
+        "fallback_md": "/root/AGENT.md",
+    },
+}
+
+# ============ Memory（记忆）管理 ============
+# 记忆按项目工作区隔离存放：/root/.codebuddy/projects/<工作区>/memory/
+CB_PROJECTS_ROOT = "/root/.codebuddy/projects"
+
 # 动态加载查看器与管理器
 def get_modules():
     spec_lv = importlib.util.spec_from_file_location("log_viewer", "/root/agent-log-viewer.py")
@@ -44,12 +75,14 @@ def get_all_sessions_data(lv, mgr):
     agy_mod = lv.load_module_from_file("agy_mod", "/root/agy-log-viewer.py")
     qoder_mod = lv.load_module_from_file("qoder_mod", "/root/qoder-log-viewer.py")
     cb_mod = lv.load_module_from_file("cb_mod", "/root/codebuddy-log-viewer.py")
+    cline_mod = lv.load_module_from_file("cline_mod", "/root/cline-log-viewer.py")
     meta = mgr.load_meta()
 
     raw_sessions = []
     raw_sessions.extend(lv.get_agy_sessions(agy_mod, show_all=True))
     raw_sessions.extend(lv.get_qoder_sessions(qoder_mod, show_all=True))
     raw_sessions.extend(lv.get_cb_sessions(cb_mod, show_all=True))
+    raw_sessions.extend(lv.get_cline_sessions(cline_mod, show_all=True))
 
     out = []
     all_tags = set()
@@ -101,12 +134,255 @@ def get_session_detail_text(sid):
         cmd.extend(["/root/qoder-log-viewer.py", path, "-s"])
     elif agent_type == "codebuddy":
         cmd.extend(["/root/codebuddy-log-viewer.py", path, "-s"])
+    elif agent_type == "cline":
+        cmd.extend(["/root/cline-log-viewer.py", path, "-s", "-T"])
 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         return proc.stdout or proc.stderr or "暂无详细对话记录"
     except Exception as e:
         return f"读取详情异常: {e}"
+
+
+# ============ Skill 管理与 Agent.md 管理 后端逻辑 ============
+
+def get_agent_meta():
+    """返回各 agent 的展示信息（不含文件内容）。"""
+    out = {}
+    for key, cfg in AGENTS.items():
+        agent_md = cfg.get("agent_md")
+        md_path = agent_md
+        if md_path and not os.path.exists(md_path) and cfg.get("fallback_md"):
+            md_path = cfg["fallback_md"]  # 专属缺失时退回全局规范
+        out[key] = {
+            "name": cfg["name"],
+            "skills_dir": cfg["skills_dir"],
+            "agent_md": cfg.get("agent_md"),
+            "fallback_md": cfg.get("fallback_md"),
+            "md_path": md_path,
+            "md_exists": bool(md_path and os.path.exists(md_path)),
+        }
+    return out
+
+
+def _list_dir_files(root, base=""):
+    """递归列出目录下所有文件相对路径（忽略隐藏/缓存目录）。"""
+    files = []
+    try:
+        entries = sorted(os.listdir(root))
+    except Exception:
+        return files
+    for e in entries:
+        if e.startswith(".") or e in ("__pycache__", "node_modules"):
+            continue
+        full = os.path.join(root, e)
+        rel = os.path.join(base, e) if base else e
+        try:
+            if os.path.isdir(full) and not os.path.islink(full):
+                files.extend(_list_dir_files(full, rel))
+            else:
+                files.append(rel)
+        except Exception:
+            files.append(rel)
+    return files
+
+
+def get_skills_list(agent_key):
+    """列出某 agent 的 skill 目录及其内部文件树。"""
+    cfg = AGENTS.get(agent_key)
+    if not cfg:
+        return {"ok": False, "error": f"未知 agent: {agent_key}"}
+    root = cfg["skills_dir"]
+    skills = []
+    if os.path.isdir(root):
+        for entry in sorted(os.listdir(root)):
+            full = os.path.join(root, entry)
+            try:
+                is_link = os.path.islink(full)
+                is_dir = os.path.isdir(full)
+                files = _list_dir_files(full) if is_dir else []
+                skills.append({
+                    "name": entry,
+                    "path": full,
+                    "is_link": is_link,
+                    "link_target": os.path.realpath(full) if is_link else None,
+                    "is_dir": is_dir,
+                    "files": files,
+                })
+            except Exception:
+                continue
+    return {"ok": True, "agent": agent_key, "skills_dir": root, "skills": skills}
+
+
+def _resolve_within(root, rel_path):
+    """将 rel_path 限定在 root 目录内，返回安全绝对路径（支持穿透顶层符号链接）。"""
+    base = os.path.realpath(root)
+    target = os.path.realpath(os.path.join(root, rel_path))
+    # 允许根 = 技能根目录 + 顶层各条目的真实路径（处理 lane -> /root/.agent 这类软链）
+    allowed = [base]
+    try:
+        for entry in os.listdir(root):
+            full = os.path.join(root, entry)
+            if os.path.islink(full):
+                allowed.append(os.path.realpath(full))
+    except Exception:
+        pass
+    for a in allowed:
+        if target == a or target.startswith(a + os.sep):
+            return target
+    raise ValueError(f"路径越界: {rel_path}")
+
+
+def read_skill_file(agent_key, rel_path):
+    """读取 skill 目录内任意文本文件。"""
+    cfg = AGENTS.get(agent_key)
+    if not cfg:
+        return {"ok": False, "error": f"未知 agent: {agent_key}"}
+    try:
+        target = _resolve_within(cfg["skills_dir"], rel_path)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    if not os.path.isfile(target):
+        return {"ok": False, "error": f"文件不存在: {rel_path}"}
+    try:
+        with open(target, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as e:
+        return {"ok": False, "error": f"读取失败: {e}"}
+    return {"ok": True, "agent": agent_key, "path": rel_path, "abs_path": target, "content": content}
+
+
+def save_skill_file(agent_key, rel_path, content):
+    """保存 skill 目录内文本文件（自动创建父目录）。"""
+    cfg = AGENTS.get(agent_key)
+    if not cfg:
+        return {"ok": False, "error": f"未知 agent: {agent_key}"}
+    try:
+        target = _resolve_within(cfg["skills_dir"], rel_path)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as e:
+        return {"ok": False, "error": f"保存失败: {e}"}
+    return {"ok": True, "agent": agent_key, "path": rel_path, "abs_path": target}
+
+
+def get_agent_md(agent_key):
+    """读取某 agent 的 Agent.md（专属缺失时退回全局规范）。"""
+    cfg = AGENTS.get(agent_key)
+    if not cfg:
+        return {"ok": False, "error": f"未知 agent: {agent_key}"}
+    agent_md = cfg.get("agent_md")
+    path = agent_md
+    using_fallback = False
+    if path and not os.path.exists(path) and cfg.get("fallback_md"):
+        path = cfg["fallback_md"]
+        using_fallback = True
+    if not path or not os.path.exists(path):
+        return {"ok": True, "agent": agent_key, "path": None, "content": "", "using_fallback": False, "absent": True}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as e:
+        return {"ok": False, "error": f"读取失败: {e}"}
+    return {"ok": True, "agent": agent_key, "path": path, "content": content, "using_fallback": using_fallback, "absent": False}
+
+
+def save_agent_md(agent_key, content):
+    """保存某 agent 的 Agent.md（写入专属路径；若专属缺失且无 fallback 则创建专属）。"""
+    cfg = AGENTS.get(agent_key)
+    if not cfg:
+        return {"ok": False, "error": f"未知 agent: {agent_key}"}
+    agent_md = cfg.get("agent_md")
+    if not agent_md:
+        return {"ok": False, "error": "该 agent 未配置专属 Agent.md 路径"}
+    path = agent_md
+    # 仅当专属存在时才写专属；否则写入 fallback（避免误新建专属空文件）
+    if not os.path.exists(path) and cfg.get("fallback_md"):
+        path = cfg["fallback_md"]
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as e:
+        return {"ok": False, "error": f"保存失败: {e}"}
+    return {"ok": True, "agent": agent_key, "path": path}
+
+
+# ============ Memory（记忆）管理 后端逻辑 ============
+
+def get_memory_projects():
+    """列出所有含 memory 目录的项目工作区。"""
+    projects = []
+    if not os.path.isdir(CB_PROJECTS_ROOT):
+        return projects
+    for ws in sorted(os.listdir(CB_PROJECTS_ROOT)):
+        mdir = os.path.join(CB_PROJECTS_ROOT, ws, "memory")
+        if os.path.isdir(mdir):
+            projects.append({"ws": ws, "path": mdir})
+    return projects
+
+
+def _list_memory_files(root):
+    """列出 memory 目录内全部 .md 文件相对路径。"""
+    files = []
+    try:
+        for base, dirs, fs in os.walk(root):
+            for f in sorted(fs):
+                if f.endswith((".md", ".markdown", ".txt", ".json")):
+                    rel = os.path.relpath(os.path.join(base, f), root)
+                    files.append(rel)
+    except Exception:
+        pass
+    return sorted(files)
+
+
+def _resolve_memory_file(ws, rel_path):
+    """将 rel_path 限定在指定工作区的 memory 目录内。"""
+    mdir = os.path.join(CB_PROJECTS_ROOT, ws, "memory")
+    base = os.path.realpath(mdir)
+    target = os.path.realpath(os.path.join(mdir, rel_path))
+    if target != base and not target.startswith(base + os.sep):
+        raise ValueError(f"路径越界: {rel_path}")
+    return target, mdir
+
+
+def read_memory_file(ws, rel_path):
+    """读取某项目记忆文件。"""
+    if not rel_path:
+        return {"ok": False, "error": "缺少文件路径"}
+    try:
+        target, _ = _resolve_memory_file(ws, rel_path)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    if not os.path.isfile(target):
+        return {"ok": False, "error": f"文件不存在: {rel_path}"}
+    try:
+        with open(target, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as e:
+        return {"ok": False, "error": f"读取失败: {e}"}
+    return {"ok": True, "ws": ws, "path": rel_path, "abs_path": target, "content": content}
+
+
+def save_memory_file(ws, rel_path, content):
+    """保存某项目记忆文件（自动建目录）。"""
+    if not rel_path:
+        return {"ok": False, "error": "缺少文件路径"}
+    try:
+        target, _ = _resolve_memory_file(ws, rel_path)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as e:
+        return {"ok": False, "error": f"保存失败: {e}"}
+    return {"ok": True, "ws": ws, "path": rel_path, "abs_path": target}
 
 
 HTML_PAGE = r"""<!DOCTYPE html>
@@ -202,6 +478,189 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .btn-primary:hover { background: #2ea043; }
     .btn-danger { background: rgba(248, 81, 73, 0.15); border-color: rgba(248, 81, 73, 0.4); color: var(--danger); }
     .btn-danger:hover { background: var(--danger); color: #fff; }
+    .btn-sm { padding: 3px 10px; font-size: 12px; }
+
+    /* 视图切换 Tab */
+    .view-tabs {
+      display: flex;
+      gap: 4px;
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 3px;
+    }
+    .view-tab {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    .view-tab:hover { color: var(--text-bright); }
+    .view-tab.active { background: #21262d; color: var(--primary); font-weight: 600; }
+
+    /* 子视图页（技能管理 / Agent.md） */
+    .view-page {
+      flex: 1;
+      display: none;
+      overflow: hidden;
+    }
+    .view-page.active { display: flex; }
+
+    /* 技能管理 三栏布局 */
+    .skill-layout {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+      gap: 0;
+    }
+    .skill-sidebar {
+      width: 240px;
+      background: var(--card-bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .skill-sidebar-head {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .skill-sidebar-body { flex: 1; overflow-y: auto; padding: 8px; }
+    .skill-item {
+      padding: 8px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 2px;
+    }
+    .skill-item:hover { background: #21262d; }
+    .skill-item.active { background: rgba(88, 166, 255, 0.15); color: var(--primary); font-weight: 600; }
+    .skill-item .link-mark { font-size: 10px; color: var(--warning); background: rgba(210, 153, 34, 0.15); padding: 1px 5px; border-radius: 4px; }
+    .skill-item .fcount { font-size: 11px; color: var(--text-muted); background: #21262d; padding: 1px 6px; border-radius: 8px; }
+
+    /* 文件列表（中栏） */
+    .skill-files {
+      width: 280px;
+      background: var(--bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .skill-files-head {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      word-break: break-all;
+    }
+    .skill-files-body { flex: 1; overflow-y: auto; padding: 8px; }
+    .file-item {
+      padding: 6px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12.5px;
+      font-family: monospace;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 1px;
+    }
+    .file-item:hover { background: #21262d; }
+    .file-item.active { background: rgba(88, 166, 255, 0.15); color: var(--primary); }
+
+    /* 编辑器（右栏） */
+    .editor-pane {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg);
+    }
+    .editor-head {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .editor-head .path-text { font-family: monospace; color: var(--text); word-break: break-all; }
+    .editor-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .editor-box {
+      flex: 1;
+      background: #0d1117;
+      color: #e6edf3;
+      border: none;
+      padding: 16px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      resize: none;
+      outline: none;
+      white-space: pre;
+      overflow: auto;
+      tab-size: 2;
+    }
+    .editor-empty {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
+    /* Agent.md 管理 两栏布局 */
+    .md-layout {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+    .md-sidebar {
+      width: 220px;
+      background: var(--card-bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      flex-shrink: 0;
+      padding: 10px;
+    }
+    .md-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+    .md-item {
+      padding: 8px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 2px;
+    }
+    .md-item:hover { background: #21262d; }
+    .md-item.active { background: rgba(88, 166, 255, 0.15); color: var(--primary); font-weight: 600; }
 
     /* 主体布局 */
     .layout {
@@ -295,6 +754,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .badge-agy { background: rgba(88, 166, 255, 0.15); color: #58a6ff; border: 1px solid rgba(88, 166, 255, 0.3); }
     .badge-qoder { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.3); }
     .badge-cb { background: rgba(188, 140, 255, 0.15); color: #bc8cff; border: 1px solid rgba(188, 140, 255, 0.3); }
+    .badge-cline { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
     .badge-ws { background: #21262d; color: var(--text-muted); border: 1px solid var(--border); }
 
     .title-cell {
@@ -381,6 +841,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <span>Lane Studio</span>
       <span class="badge-v">v2.2.0</span>
     </div>
+    <div class="view-tabs">
+      <button class="view-tab active" id="tab-view-sessions" onclick="switchView('sessions')">📋 会话管理</button>
+      <button class="view-tab" id="tab-view-skills" onclick="switchView('skills')">🧩 技能管理</button>
+      <button class="view-tab" id="tab-view-agentmd" onclick="switchView('agentmd')">📄 Agent.md</button>
+      <button class="view-tab" id="tab-view-memory" onclick="switchView('memory')">🧠 记忆管理</button>
+    </div>
     <div class="header-actions">
       <input type="text" id="search" class="search-box" placeholder="搜索会话标题、ID、关键词..." oninput="renderTable()">
       <button class="btn btn-primary" onclick="cleanEmpty()">🧹 一键清理空会话</button>
@@ -388,6 +854,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
   </header>
 
+  <div class="view-page active" id="view-sessions">
   <div class="layout">
     <!-- 侧边栏 -->
     <aside>
@@ -428,6 +895,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <div class="nav-item" onclick="setAgent('codebuddy')" id="agent-codebuddy">
           <span>CodeBuddy (审查归档)</span>
           <span class="count" id="count-agent-codebuddy">0</span>
+        </div>
+        <div class="nav-item" onclick="setAgent('cline')" id="agent-cline">
+          <span>Cline (全能执行)</span>
+          <span class="count" id="count-agent-cline">0</span>
         </div>
       </div>
 
@@ -491,6 +962,89 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <div class="drawer-body" id="drawer-content">正在加载详情...</div>
     </div>
   </div>
+  </div><!-- /view-sessions -->
+
+  <!-- 🧩 技能管理视图 -->
+  <div class="view-page" id="view-skills">
+    <div class="skill-layout">
+      <!-- 左侧：agent 选择 + skill 列表 -->
+      <div class="skill-sidebar">
+        <div class="skill-sidebar-head">
+          <span>🧩 Agent 技能</span>
+          <span class="fcount" id="skills-count" style="background:#21262d;color:var(--text-muted);padding:1px 8px;border-radius:8px;font-size:11px;">-</span>
+        </div>
+        <div style="padding: 8px 12px; display: flex; gap: 6px; border-bottom: 1px solid var(--border);">
+          <button class="view-tab active" id="skill-agent-agy" onclick="loadSkills('agy')">agy</button>
+          <button class="view-tab" id="skill-agent-qoder" onclick="loadSkills('qoder')">qoder</button>
+          <button class="view-tab" id="skill-agent-codebuddy" onclick="loadSkills('codebuddy')">codebuddy</button>
+          <button class="view-tab" id="skill-agent-cline" onclick="loadSkills('cline')">cline</button>
+        </div>
+        <div class="skill-sidebar-body" id="skill-list">选择左侧 Agent 加载技能列表...</div>
+      </div>
+      <!-- 中间：skill 文件列表 -->
+      <div class="skill-files">
+        <div class="skill-files-head" id="skill-files-head">👆 选择技能查看文件</div>
+        <div class="skill-files-body" id="skill-files-body">暂无文件</div>
+      </div>
+      <!-- 右侧：文件编辑器 -->
+      <div class="editor-pane">
+        <div class="editor-head">
+          <span class="path-text" id="editor-path">未选择文件</span>
+          <div class="editor-actions">
+            <span id="editor-status" style="font-size:12px;"></span>
+            <button class="btn btn-primary btn-sm" id="btn-save-skill" style="display:none;" onclick="saveSkillFile()">💾 保存</button>
+          </div>
+        </div>
+        <textarea class="editor-box" id="skill-editor" placeholder="点击中间文件列表加载内容，编辑后点击「保存」写入磁盘。" spellcheck="false"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- 📄 Agent.md 管理视图 -->
+  <div class="view-page" id="view-agentmd">
+    <div class="md-layout">
+      <div class="md-sidebar" id="md-sidebar">
+        <div style="padding: 10px 12px; font-size: 13px; font-weight: 600; color: var(--text-muted);">📄 Agent.md 管理</div>
+      </div>
+      <div class="md-main">
+        <div class="editor-head">
+          <span class="path-text" id="md-path">未选择 Agent</span>
+          <div class="editor-actions">
+            <span id="md-status" style="font-size:12px;"></span>
+            <button class="btn btn-primary btn-sm" id="btn-save-md" style="display:none;" onclick="saveAgentMd()">💾 保存</button>
+          </div>
+        </div>
+        <textarea class="editor-box" id="md-editor" placeholder="选择左侧 Agent 查看/编辑其 Agent.md 配置。" spellcheck="false"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- 🧠 记忆管理视图 -->
+  <div class="view-page" id="view-memory">
+    <div class="md-layout">
+      <!-- 左侧：项目工作区列表 -->
+      <div class="md-sidebar" id="memory-projects">
+        <div style="padding: 10px 12px; font-size: 13px; font-weight: 600; color: var(--text-muted);">🧠 项目记忆</div>
+        <div style="padding: 0 12px 10px; font-size: 11px; color: var(--text-muted);">按工作区隔离的记忆目录</div>
+      </div>
+      <!-- 中部：记忆文件列表 -->
+      <div class="skill-files" style="width: 260px;">
+        <div class="skill-files-head" id="memory-files-head">👆 选择项目查看记忆文件</div>
+        <div class="skill-files-body" id="memory-files-body">暂无文件</div>
+      </div>
+      <!-- 右侧：编辑器 -->
+      <div class="editor-pane">
+        <div class="editor-head">
+          <span class="path-text" id="memory-editor-path">未选择记忆文件</span>
+          <div class="editor-actions">
+            <span id="memory-editor-status" style="font-size:12px;"></span>
+            <button class="btn btn-primary btn-sm" id="btn-save-memory" style="display:none;" onclick="saveMemoryFile()">💾 保存</button>
+          </div>
+        </div>
+        <textarea class="editor-box" id="memory-editor" placeholder="选择左侧项目与文件，查看/编辑记忆内容（可删减）。" spellcheck="false"></textarea>
+      </div>
+    </div>
+  </div>
 
   <script>
     let allSessions = [];
@@ -504,6 +1058,300 @@ HTML_PAGE = r"""<!DOCTYPE html>
     let currentDrawerWs = null;
     let currentSortField = 'time';
     let currentSortOrder = 'desc';
+
+    // ---- 视图切换 ----
+    function switchView(view) {
+      ['sessions', 'skills', 'agentmd', 'memory'].forEach(v => {
+        const page = document.getElementById('view-' + v);
+        const tab = document.getElementById('tab-view-' + v);
+        if (page) page.classList.toggle('active', v === view);
+        if (tab) tab.classList.toggle('active', v === view);
+      });
+      if (view === 'skills' && !window._skillsLoaded) loadSkills('agy');
+      if (view === 'agentmd' && !window._mdLoaded) loadAgentMd();
+      if (view === 'memory' && !window._memoryLoaded) loadMemoryProjects();
+    }
+
+    // ==================== 🧩 技能管理 ====================
+    let _skillsAgent = 'agy';
+    let _skillsList = [];
+    let _currentSkillFiles = [];
+    let _currentSkillFile = null;
+
+    async function loadSkills(agent) {
+      _skillsAgent = agent;
+      window._skillsLoaded = true;
+      document.querySelectorAll('[id^="skill-agent-"]').forEach(el => el.classList.remove('active'));
+      document.getElementById('skill-agent-' + agent).classList.add('active');
+      document.getElementById('skill-files-head').innerText = '👆 选择技能查看文件';
+      document.getElementById('skill-files-body').innerText = '暂无文件';
+      document.getElementById('editor-path').innerText = '未选择文件';
+      document.getElementById('editor-status').innerText = '';
+      document.getElementById('btn-save-skill').style.display = 'none';
+      document.getElementById('skill-editor').value = '';
+      _currentSkillFiles = [];
+      _currentSkillFile = null;
+
+      try {
+        const res = await fetch('/api/skills?agent=' + agent);
+        const data = await res.json();
+        if (!data.ok) { document.getElementById('skill-list').innerText = data.error || '加载失败'; return; }
+        _skillsList = data.skills || [];
+        document.getElementById('skills-count').innerText = data.skills_dir || '';
+        const listEl = document.getElementById('skill-list');
+        if (_skillsList.length === 0) {
+          listEl.innerHTML = '<div style="color: var(--text-muted); padding: 16px;">该 Agent 暂无技能</div>';
+          return;
+        }
+        listEl.innerHTML = _skillsList.map(s => `
+          <div class="skill-item" data-name="${escapeHtml(s.name)}" onclick="selectSkill('${s.name.replace(/'/g, "\\'")}')">
+            <span>${s.is_link ? '🔗' : '📁'} ${escapeHtml(s.name)}</span>
+            <span class="fcount">${s.files.length}</span>
+          </div>
+        `).join('');
+        // 自动选中第一个
+        if (_skillsList[0]) selectSkill(_skillsList[0].name);
+      } catch (e) {
+        document.getElementById('skill-list').innerText = '加载失败: ' + e;
+      }
+    }
+
+    function selectSkill(name) {
+      const skill = _skillsList.find(s => s.name === name);
+      if (!skill) return;
+      // 高亮 skill
+      document.querySelectorAll('.skill-item').forEach(el => el.classList.remove('active'));
+      const itemEl = document.querySelector(`.skill-item[data-name="${name.replace(/"/g, '\\"')}"]`);
+      if (itemEl) itemEl.classList.add('active');
+
+      _currentSkillFiles = skill.files || [];
+      document.getElementById('skill-files-head').innerHTML = `${escapeHtml(name)} <span style="font-weight:400;color:var(--text-muted);">${skill.is_link ? '🔗 符号链接' : ''}</span>`;
+      const filesEl = document.getElementById('skill-files-body');
+      if (_currentSkillFiles.length === 0) {
+        filesEl.innerHTML = '<div style="color: var(--text-muted); padding: 16px;">该技能目录为空</div>';
+      } else {
+        filesEl.innerHTML = _currentSkillFiles.map(f => `
+          <div class="file-item ${f === _currentSkillFile ? 'active' : ''}" onclick="openSkillFile('${f.replace(/'/g, "\\'")}')">${escapeHtml(f)}</div>
+        `).join('');
+      }
+      // 默认打开 SKILL.md
+      if (_currentSkillFiles.includes('SKILL.md')) openSkillFile('SKILL.md');
+      else if (_currentSkillFiles.length > 0) openSkillFile(_currentSkillFiles[0]);
+    }
+
+    async function openSkillFile(path) {
+      _currentSkillFile = path;
+      document.querySelectorAll('.file-item').forEach(el => {
+        el.classList.toggle('active', el.innerText.trim() === path);
+      });
+      document.getElementById('editor-path').innerText = `${_skillsAgent}/${path}`;
+      document.getElementById('editor-status').innerText = '加载中...';
+      document.getElementById('btn-save-skill').style.display = 'none';
+      try {
+        const res = await fetch('/api/skill-file?agent=' + _skillsAgent + '&path=' + encodeURIComponent(path));
+        const data = await res.json();
+        if (!data.ok) { document.getElementById('editor-status').innerText = data.error || '读取失败'; return; }
+        document.getElementById('skill-editor').value = data.content;
+        document.getElementById('editor-status').innerText = `📄 ${data.abs_path}`;
+        document.getElementById('btn-save-skill').style.display = 'inline-flex';
+      } catch (e) {
+        document.getElementById('editor-status').innerText = '读取失败: ' + e;
+      }
+    }
+
+    async function saveSkillFile() {
+      if (!_currentSkillFile) return;
+      const content = document.getElementById('skill-editor').value;
+      document.getElementById('editor-status').innerText = '保存中...';
+      try {
+        const res = await fetch('/api/save-skill-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent: _skillsAgent, path: _currentSkillFile, content })
+        });
+        const data = await res.json();
+        if (data.ok) document.getElementById('editor-status').innerText = `✅ 已保存 → ${data.abs_path}`;
+        else document.getElementById('editor-status').innerText = '❌ ' + (data.error || '保存失败');
+      } catch (e) {
+        document.getElementById('editor-status').innerText = '保存失败: ' + e;
+      }
+    }
+
+    // ==================== 📄 Agent.md 管理 ====================
+    let _mdAgent = null;
+
+    async function loadAgentMd() {
+      window._mdLoaded = true;
+      try {
+        const res = await fetch('/api/agents');
+        const data = await res.json();
+        const agents = data.agents || {};
+        const sidebar = document.getElementById('md-sidebar');
+        let html = `<div style="padding: 10px 12px; font-size: 13px; font-weight: 600; color: var(--text-muted);">📄 Agent.md 管理</div>`;
+        Object.keys(agents).forEach(key => {
+          const a = agents[key];
+          const label = a.name || key;
+          html += `<div class="md-item ${_mdAgent === key ? 'active' : ''}" id="md-item-${key}" onclick="openAgentMd('${key}')">
+            <span>${escapeHtml(label)}</span>
+            <span style="font-size:10px; color:var(--text-muted);">${a.md_exists ? '' : '⚠️'}</span>
+          </div>`;
+        });
+        sidebar.innerHTML = html;
+        // 默认打开第一个
+        const keys = Object.keys(agents);
+        if (keys.length > 0 && !_mdAgent) openAgentMd(keys[0]);
+      } catch (e) {
+        document.getElementById('md-sidebar').innerText = '加载失败: ' + e;
+      }
+    }
+
+    async function openAgentMd(agent) {
+      _mdAgent = agent;
+      document.querySelectorAll('.md-item').forEach(el => el.classList.remove('active'));
+      const item = document.getElementById('md-item-' + agent);
+      if (item) item.classList.add('active');
+      document.getElementById('md-status').innerText = '加载中...';
+      document.getElementById('btn-save-md').style.display = 'none';
+      try {
+        const res = await fetch('/api/agentmd?agent=' + agent);
+        const data = await res.json();
+        if (!data.ok) { document.getElementById('md-status').innerText = data.error || '读取失败'; return; }
+        if (data.absent) {
+          document.getElementById('md-path').innerText = agent + ' / Agent.md (尚未创建)';
+          document.getElementById('md-editor').value = '';
+          document.getElementById('md-status').innerText = '该 Agent 尚无 Agent.md，填写后保存即可创建';
+          document.getElementById('btn-save-md').style.display = 'inline-flex';
+          return;
+        }
+        document.getElementById('md-path').innerText = data.path;
+        document.getElementById('md-editor').value = data.content;
+        document.getElementById('md-status').innerText = data.using_fallback ? '（专属缺失，当前编辑全局规范）' : '';
+        document.getElementById('btn-save-md').style.display = 'inline-flex';
+      } catch (e) {
+        document.getElementById('md-status').innerText = '读取失败: ' + e;
+      }
+    }
+
+    async function saveAgentMd() {
+      if (!_mdAgent) return;
+      const content = document.getElementById('md-editor').value;
+      document.getElementById('md-status').innerText = '保存中...';
+      try {
+        const res = await fetch('/api/save-agentmd', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent: _mdAgent, content })
+        });
+        const data = await res.json();
+        if (data.ok) document.getElementById('md-status').innerText = '✅ 已保存 → ' + data.path;
+        else document.getElementById('md-status').innerText = '❌ ' + (data.error || '保存失败');
+      } catch (e) {
+        document.getElementById('md-status').innerText = '保存失败: ' + e;
+      }
+    }
+
+    // ==================== 🧠 记忆管理 ====================
+    let _memoryWs = null;
+    let _memoryFiles = [];
+    let _memoryCurrentFile = null;
+
+    async function loadMemoryProjects() {
+      window._memoryLoaded = true;
+      try {
+        const res = await fetch('/api/memories');
+        const data = await res.json();
+        if (!data.ok) { document.getElementById('memory-projects').innerHTML = data.error || '加载失败'; return; }
+        const projects = data.projects || [];
+        const sidebar = document.getElementById('memory-projects');
+        let html = `<div style="padding: 10px 12px; font-size: 13px; font-weight: 600; color: var(--text-muted);">🧠 项目记忆</div>
+                    <div style="padding: 0 12px 10px; font-size: 11px; color: var(--text-muted);">按工作区隔离的记忆目录</div>`;
+        if (projects.length === 0) {
+          html += '<div style="padding: 16px; color: var(--text-muted);">暂无项目记忆</div>';
+        }
+        projects.forEach(p => {
+          html += `<div class="md-item ${_memoryWs === p.ws ? 'active' : ''}" id="memory-ws-${p.ws}" onclick="selectMemoryWs('${p.ws.replace(/'/g, "\\'")}')">
+            <span>📁 ${escapeHtml(p.ws)}</span>
+          </div>`;
+        });
+        sidebar.innerHTML = html;
+        // 默认选中当前工作区
+        const cur = projects.find(p => p.ws === 'root-metax-workbench');
+        const first = cur || projects[0];
+        if (first) selectMemoryWs(first.ws);
+      } catch (e) {
+        document.getElementById('memory-projects').innerHTML = '加载失败: ' + e;
+      }
+    }
+
+    async function selectMemoryWs(ws) {
+      _memoryWs = ws;
+      document.querySelectorAll('#memory-projects .md-item').forEach(el => el.classList.remove('active'));
+      const el = document.getElementById('memory-ws-' + ws);
+      if (el) el.classList.add('active');
+      document.getElementById('memory-files-head').innerText = `📁 ${ws} / memory`;
+      document.getElementById('memory-editor-path').innerText = '未选择记忆文件';
+      document.getElementById('memory-editor-status').innerText = '';
+      document.getElementById('btn-save-memory').style.display = 'none';
+      document.getElementById('memory-editor').value = '';
+      _memoryCurrentFile = null;
+      try {
+        const res = await fetch('/api/memory-files?ws=' + encodeURIComponent(ws));
+        const data = await res.json();
+        if (!data.ok) { document.getElementById('memory-files-body').innerText = data.error || '加载失败'; return; }
+        _memoryFiles = data.files || [];
+        const body = document.getElementById('memory-files-body');
+        if (_memoryFiles.length === 0) {
+          body.innerHTML = '<div style="color: var(--text-muted); padding: 16px;">该项目无记忆文件</div>';
+          return;
+        }
+        body.innerHTML = _memoryFiles.map(f => `
+          <div class="file-item ${f === _memoryCurrentFile ? 'active' : ''}" onclick="openMemoryFile('${f.replace(/'/g, "\\'")}')">${escapeHtml(f)}</div>
+        `).join('');
+        // 默认打开 MEMORY.md
+        if (_memoryFiles.includes('MEMORY.md')) openMemoryFile('MEMORY.md');
+        else if (_memoryFiles.length > 0) openMemoryFile(_memoryFiles[0]);
+      } catch (e) {
+        document.getElementById('memory-files-body').innerText = '加载失败: ' + e;
+      }
+    }
+
+    async function openMemoryFile(path) {
+      _memoryCurrentFile = path;
+      document.querySelectorAll('#memory-files-body .file-item').forEach(el => {
+        el.classList.toggle('active', el.innerText.trim() === path);
+      });
+      document.getElementById('memory-editor-path').innerText = `${_memoryWs}/${path}`;
+      document.getElementById('memory-editor-status').innerText = '加载中...';
+      document.getElementById('btn-save-memory').style.display = 'none';
+      try {
+        const res = await fetch('/api/memory-file?ws=' + encodeURIComponent(_memoryWs) + '&path=' + encodeURIComponent(path));
+        const data = await res.json();
+        if (!data.ok) { document.getElementById('memory-editor-status').innerText = data.error || '读取失败'; return; }
+        document.getElementById('memory-editor').value = data.content;
+        document.getElementById('memory-editor-status').innerText = `📄 ${data.abs_path}`;
+        document.getElementById('btn-save-memory').style.display = 'inline-flex';
+      } catch (e) {
+        document.getElementById('memory-editor-status').innerText = '读取失败: ' + e;
+      }
+    }
+
+    async function saveMemoryFile() {
+      if (!_memoryCurrentFile) return;
+      const content = document.getElementById('memory-editor').value;
+      document.getElementById('memory-editor-status').innerText = '保存中...';
+      try {
+        const res = await fetch('/api/save-memory-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ws: _memoryWs, path: _memoryCurrentFile, content })
+        });
+        const data = await res.json();
+        if (data.ok) document.getElementById('memory-editor-status').innerText = '✅ 已保存 → ' + data.abs_path;
+        else document.getElementById('memory-editor-status').innerText = '❌ ' + (data.error || '保存失败');
+      } catch (e) {
+        document.getElementById('memory-editor-status').innerText = '保存失败: ' + e;
+      }
+    }
 
     function toggleSort(field) {
       if (currentSortField === field) {
@@ -543,7 +1391,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     function updateCounts() {
       let active = 0, pinned = 0, archived = 0, trash = 0;
-      let cAll = 0, cAgy = 0, cQoder = 0, cCb = 0;
+      let cAll = 0, cAgy = 0, cQoder = 0, cCb = 0, cCline = 0;
       allSessions.forEach(s => {
         if (s.deleted) trash++;
         else if (s.archived) archived++;
@@ -555,6 +1403,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           if (a === 'agy') cAgy++;
           else if (a === 'qoder') cQoder++;
           else if (a.includes('buddy')) cCb++;
+          else if (a === 'cline') cCline++;
         }
       });
       document.getElementById('count-active').innerText = active;
@@ -565,6 +1414,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       if (document.getElementById('count-agent-agy')) document.getElementById('count-agent-agy').innerText = cAgy;
       if (document.getElementById('count-agent-qoder')) document.getElementById('count-agent-qoder').innerText = cQoder;
       if (document.getElementById('count-agent-codebuddy')) document.getElementById('count-agent-codebuddy').innerText = cCb;
+      if (document.getElementById('count-agent-cline')) document.getElementById('count-agent-cline').innerText = cCline;
     }
 
     function renderWorkspaces() {
@@ -677,8 +1527,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       tbody.innerHTML = filtered.map(s => {
         let agentBadge = '';
-        if (s.agent === 'agy') agentBadge = '<span class="badge badge-agy">agy</span>';
-        else if (s.agent === 'qoder') agentBadge = '<span class="badge badge-qoder">qoder</span>';
+        const ag = (s.agent || '').toLowerCase();
+        if (ag === 'agy') agentBadge = '<span class="badge badge-agy">agy</span>';
+        else if (ag === 'qoder') agentBadge = '<span class="badge badge-qoder">qoder</span>';
+        else if (ag === 'cline') agentBadge = '<span class="badge badge-cline">cline</span>';
         else agentBadge = '<span class="badge badge-cb">CodeBuddy</span>';
 
         const starClass = s.pinned ? 'active-star' : '';
@@ -892,6 +1744,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
         cmd = `codebuddy -r ${currentDrawerSid}`;
       } else if (currentDrawerAgent === 'agy') {
         cmd = `agy --conversation ${currentDrawerSid}`;
+      } else if (currentDrawerAgent === 'cline') {
+        cmd = `cline --id ${currentDrawerSid} -i`;
       }
       navigator.clipboard.writeText(cmd).then(() => alert(`接管命令已复制到剪贴板:\n${cmd}`));
     }
@@ -926,12 +1780,58 @@ class LanePanelHandler(BaseHTTPRequestHandler):
 
         if path == "/api/detail":
             qs = urllib.parse.parse_qs(parsed.query)
-            sid = qs.get("id", [""])[0]
+            sid = qs.get("id", qs.get("sid", [""]))[0]
             detail_text = get_session_detail_text(sid)
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(detail_text.encode("utf-8"))
+            return
+
+        # ---- Skill 管理与 Agent.md 管理 GET 路由 ----
+        if path == "/api/agents":
+            self.send_json({"ok": True, "agents": get_agent_meta()})
+            return
+
+        if path == "/api/skills":
+            qs = urllib.parse.parse_qs(parsed.query)
+            agent = qs.get("agent", [""])[0]
+            self.send_json(get_skills_list(agent))
+            return
+
+        if path == "/api/skill-file":
+            qs = urllib.parse.parse_qs(parsed.query)
+            agent = qs.get("agent", [""])[0]
+            rel = qs.get("path", [""])[0]
+            self.send_json(read_skill_file(agent, rel))
+            return
+
+        if path == "/api/agentmd":
+            qs = urllib.parse.parse_qs(parsed.query)
+            agent = qs.get("agent", [""])[0]
+            self.send_json(get_agent_md(agent))
+            return
+
+        # ---- Memory（记忆）管理 GET 路由 ----
+        if path == "/api/memories":
+            self.send_json({"ok": True, "projects": get_memory_projects()})
+            return
+
+        if path == "/api/memory-files":
+            qs = urllib.parse.parse_qs(parsed.query)
+            ws = qs.get("ws", [""])[0]
+            mdir = os.path.join(CB_PROJECTS_ROOT, ws, "memory")
+            if not os.path.isdir(mdir):
+                self.send_json({"ok": False, "error": f"项目 {ws} 无 memory 目录"})
+                return
+            self.send_json({"ok": True, "ws": ws, "files": _list_memory_files(mdir)})
+            return
+
+        if path == "/api/memory-file":
+            qs = urllib.parse.parse_qs(parsed.query)
+            ws = qs.get("ws", [""])[0]
+            rel = qs.get("path", [""])[0]
+            self.send_json(read_memory_file(ws, rel))
             return
 
         self.send_response(404)
@@ -1002,6 +1902,27 @@ class LanePanelHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "cleaned": cleaned})
             return
 
+        # ---- Skill 管理与 Agent.md 管理 POST 路由 ----
+        if path == "/api/save-skill-file":
+            agent = data.get("agent", "")
+            rel = data.get("path", "")
+            content = data.get("content", "")
+            self.send_json(save_skill_file(agent, rel, content))
+            return
+
+        if path == "/api/save-agentmd":
+            agent = data.get("agent", "")
+            content = data.get("content", "")
+            self.send_json(save_agent_md(agent, content))
+            return
+
+        if path == "/api/save-memory-file":
+            ws = data.get("ws", "")
+            rel = data.get("path", "")
+            content = data.get("content", "")
+            self.send_json(save_memory_file(ws, rel, content))
+            return
+
         self.send_response(404)
         self.end_headers()
 
@@ -1021,6 +1942,7 @@ def main():
     p.add_argument("--port", "-p", type=int, default=PORT, help=f"监听端口 (默认 {PORT})")
     args = p.parse_args()
 
+    HTTPServer.allow_reuse_address = True
     server = HTTPServer(("0.0.0.0", args.port), LanePanelHandler)
     print(f"============================================================")
     print(f"🏊‍♂️ Lane Studio 控制面板已启动！")

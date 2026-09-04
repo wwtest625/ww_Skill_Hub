@@ -1,12 +1,12 @@
 ---
 name: lane
-version: 2.2.0
-display_name: "Lane（三 Agent 泳道协同与会话管理）"
-description: Lane（泳道模式）——三 Agent（agy / qoder / CodeBuddy）异构协同总线：跨 Agent 会话注入、多工作区会话查看、会话管理（改名/打标/清理/回收站）、轻量 Web 控制面板、共享基建与避坑规范。触发词：lane、泳道、协作、会话记录、查看记录、会话注入、另一个agent、互通、handoff、黑板、面板、会话管理、清理会话
-keywords: lane,泳道,协作,会话注入,agent-inject,qoder,agy,antigravity,codebuddy,会话记录,log-viewer,agent-log-viewer,工作区,互通,分工,handoff,黑板,xssh,GPU,会话管理,panel,改名,打标签,清理
+version: 2.3.0
+display_name: "Lane（四 Agent 泳道协同与会话管理）"
+description: Lane（泳道模式）——四 Agent（agy / qoder / CodeBuddy / Cline）异构协同总线：跨 Agent 会话注入、多工作区会话查看、会话管理（改名/打标/清理/回收站）、轻量 Web 控制面板、共享基建与避坑规范。触发词：lane、泳道、协作、会话记录、查看记录、会话注入、另一个agent、互通、handoff、黑板、面板、会话管理、清理会话、cline
+keywords: lane,泳道,协作,会话注入,agent-inject,qoder,agy,antigravity,codebuddy,cline,会话记录,log-viewer,agent-log-viewer,工作区,互通,分工,handoff,黑板,xssh,GPU,会话管理,panel,改名,打标签,清理
 ---
 
-# 🏊‍♂️ Lane —— 三 Agent 泳道协同与会话管理手册
+# 🏊‍♂️ Lane —— 四 Agent 泳道协同与会话管理手册
 
 ## 一、 泳道分工
 
@@ -15,6 +15,7 @@ keywords: lane,泳道,协作,会话注入,agent-inject,qoder,agy,antigravity,cod
 | **agy** | 系统架构 / 核心后端 / GPU 压测 | 系统设计、服务端实现、算力基建 |
 | **qoder** | 前端 UI / 组件开发 / 界面交互测试 | Web 前端、组件库、用户交互 |
 | **CodeBuddy** | 代码审查 (Review) / 安全审计 / 文档交付 | 代码质量、安全合规、工程文档 |
+| **Cline** | 全能执行 / 深度工程 / 终端自动化任务 | 终端排障、命令行编排、项目巡检 |
 | **人类 (You)** | 调度中枢 / 随时交互接管 | 业务决策、随时切入任意泳道 |
 
 ---
@@ -25,12 +26,14 @@ keywords: lane,泳道,协作,会话注入,agent-inject,qoder,agy,antigravity,cod
 ```bash
 lane qoder "我是 agy，已写好后端，请进行前端 UI 测试"
 lane codebuddy "请对 /root/demo.py 进行安全审查"
+lane cline "排查服务器配置并执行自动化验证"
 lane agy "继续排查内存泄漏问题"
 ```
 
 ### 2. 精准会话注入（指定会话 / 新开会话）
 ```bash
 lane inject --to qoder --session <ID> --intent "UI测试" --msg "任务说明"
+lane inject --to cline --session <ID> --intent "自动化执行" --msg "任务说明"
 lane inject --to codebuddy --new --intent "新建审查" --msg "任务说明"
 ```
 
@@ -68,6 +71,7 @@ lane panel [--port 3457]     # 启动可视化控制台 (http://localhost:3457)
 ### 6. 人工现场接管
 ```bash
 lane resume qoder [ID]       # 智能提示带工作区参数的接管命令
+lane resume cline [ID]       # 提示 cline --id <id> -i
 ```
 
 ---

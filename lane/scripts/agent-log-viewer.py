@@ -32,6 +32,7 @@ signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 AGY_CONV_DIR = "/root/.gemini/antigravity-cli/conversations"
 QODER_PROJ_DIR = "/root/.qoder/projects"
 CB_PROJ_DIR = "/root/.codebuddy/projects"
+CLINE_DATA_DIR = "/root/.cline/data"
 
 
 def load_module_from_file(mod_name, file_path):
@@ -269,7 +270,49 @@ def get_cb_sessions(cb_mod, grep=None, ws_filter=None, show_all=False):
     return res
 
 
+def get_cline_sessions(cline_mod, grep=None, ws_filter=None, show_all=False):
+    sums = cline_mod.load_summaries()
+    res = []
+    kw = grep.lower() if grep else None
+    wskw = ws_filter.lower() if ws_filter else None
+    for sid, info in sums.items():
+        title = info["title"]
+        if not show_all and is_noisy_session(title):
+            continue
+        ws = normalize_workspace(info["cwd"])
+        if wskw and wskw not in ws.lower() and wskw not in str(info["cwd"]).lower():
+            continue
+        msg_path = info["messages_path"]
+        if kw:
+            if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not cline_mod.file_contains_keyword(msg_path, grep):
+                continue
+        size_bytes = 0
+        if msg_path and os.path.isfile(msg_path):
+            size_bytes = os.path.getsize(msg_path)
+        else:
+            sdir = os.path.join(CLINE_DATA_DIR, "sessions", sid)
+            if os.path.isdir(sdir):
+                for root, _, files in os.walk(sdir):
+                    for f in files:
+                        size_bytes += os.path.getsize(os.path.join(root, f))
+
+        res.append({
+            "agent": "cline",
+            "mtime": info["mtime"],
+            "ts": info["ts"],
+            "ws": ws,
+            "size_bytes": size_bytes,
+            "size_str": format_size(size_bytes),
+            "title": title,
+            "sid": sid,
+            "path": msg_path or sid
+        })
+    return res
+
+
 def find_session_agent(session_arg):
+    if not session_arg or not str(session_arg).strip():
+        return None, None
     if os.path.isfile(session_arg):
         if session_arg.endswith(".db"):
             return "agy", session_arg
@@ -277,12 +320,15 @@ def find_session_agent(session_arg):
             return "codebuddy", session_arg
         elif ".qoder" in session_arg:
             return "qoder", session_arg
+        elif ".cline" in session_arg:
+            return "cline", session_arg
 
     agy_matches = [p for p in glob.glob(os.path.join(AGY_CONV_DIR, "*.db")) if session_arg in os.path.basename(p)]
     qoder_matches = [p for p in glob.glob(os.path.join(QODER_PROJ_DIR, "*", "*.jsonl")) if session_arg in os.path.basename(p)]
     cb_matches = [p for p in glob.glob(os.path.join(CB_PROJ_DIR, "*", "*.jsonl")) if session_arg in os.path.basename(p)]
+    cline_matches = [p for p in glob.glob(os.path.join(CLINE_DATA_DIR, "sessions", "*", "*.messages.json")) if session_arg in os.path.basename(os.path.dirname(p))]
 
-    total = len(agy_matches) + len(qoder_matches) + len(cb_matches)
+    total = len(agy_matches) + len(qoder_matches) + len(cb_matches) + len(cline_matches)
     if total == 0:
         return None, None
     if total > 1:
@@ -293,6 +339,8 @@ def find_session_agent(session_arg):
             print(f"  [qoder] {os.path.basename(p)[:36]}")
         for p in cb_matches:
             print(f"  [CodeBuddy] {os.path.basename(p)[:-6]}")
+        for p in cline_matches:
+            print(f"  [cline] {os.path.basename(os.path.dirname(p))}")
         sys.exit(1)
 
     if agy_matches:
@@ -301,11 +349,13 @@ def find_session_agent(session_arg):
         return "qoder", qoder_matches[0]
     if cb_matches:
         return "codebuddy", cb_matches[0]
+    if cline_matches:
+        return "cline", cline_matches[0]
     return None, None
 
 
 def main():
-    p = argparse.ArgumentParser(description="三 Agent 统一会话记录查看器 (agy / qoder / CodeBuddy)")
+    p = argparse.ArgumentParser(description="四 Agent 统一会话记录查看器 (agy / qoder / CodeBuddy / Cline)")
     p.add_argument("session", nargs="?", help="会话 ID（前缀即可）或文件路径")
     p.add_argument("-s", "--summary", action="store_true", help="摘要模式")
     p.add_argument("-g", "--grep", metavar="关键词", help="全局搜索或对话内过滤关键词")
@@ -315,11 +365,11 @@ def main():
     p.add_argument("-A", "--all", action="store_true", help="显示全部会话（包含空会话、指令、归档与回收站）")
     p.add_argument("--trash", action="store_true", help="仅查看回收站中的会话")
     p.add_argument("--archived", action="store_true", help="仅查看已归档的会话")
-    p.add_argument("-a", "--agent", choices=["agy", "qoder", "codebuddy", "all"], default="all",
+    p.add_argument("-a", "--agent", choices=["agy", "qoder", "codebuddy", "cline", "all"], default="all",
                    help="筛选特定 agent 的会话")
     p.add_argument("-S", "--sort", choices=["time", "time-asc", "size", "size-asc"], default="time",
                    help="排序方式: time(默认时间降序), time-asc(时间升序), size(体积降序), size-asc(体积升序)")
-    p.add_argument("-T", "--no-thinking", action="store_true", help="agy 会话跳过思考流")
+    p.add_argument("-T", "--no-thinking", action="store_true", help="跳过思考流")
     args = p.parse_args()
 
     if args.session:
@@ -342,6 +392,11 @@ def main():
             cmd.extend(["/root/codebuddy-log-viewer.py", path])
             if args.summary: cmd.append("-s")
             if args.grep: cmd.extend(["-g", args.grep])
+        elif agent_type == "cline":
+            cmd.extend(["/root/cline-log-viewer.py", path])
+            if args.summary: cmd.append("-s")
+            if args.grep: cmd.extend(["-g", args.grep])
+            if args.no_thinking: cmd.append("-T")
         
         subprocess.run(cmd)
         return
@@ -350,6 +405,7 @@ def main():
     agy_mod = load_module_from_file("agy_mod", "/root/agy-log-viewer.py")
     qoder_mod = load_module_from_file("qoder_mod", "/root/qoder-log-viewer.py")
     cb_mod = load_module_from_file("cb_mod", "/root/codebuddy-log-viewer.py")
+    cline_mod = load_module_from_file("cline_mod", "/root/cline-log-viewer.py")
     meta = load_lane_meta()
 
     all_sessions = []
@@ -360,6 +416,8 @@ def main():
         all_sessions.extend(get_qoder_sessions(qoder_mod, grep=args.grep, ws_filter=args.workspace, show_all=show_raw))
     if args.agent in ("all", "codebuddy"):
         all_sessions.extend(get_cb_sessions(cb_mod, grep=args.grep, ws_filter=args.workspace, show_all=show_raw))
+    if args.agent in ("all", "cline"):
+        all_sessions.extend(get_cline_sessions(cline_mod, grep=args.grep, ws_filter=args.workspace, show_all=show_raw))
 
     # 应用增强元数据
     enriched = []

@@ -21,6 +21,7 @@ from datetime import datetime
 AGY_CONV_DIR = "/root/.gemini/antigravity-cli/conversations"
 QODER_PROJ_DIR = "/root/.qoder/projects"
 CB_PROJ_DIR = "/root/.codebuddy/projects"
+CLINE_DATA_DIR = "/root/.cline/data"
 
 
 def get_latest_session(agent):
@@ -39,6 +40,11 @@ def get_latest_session(agent):
                        key=os.path.getmtime, reverse=True)
         if files:
             return os.path.basename(files[0])[:-3]
+    elif agent == "cline":
+        files = sorted(glob.glob(os.path.join(CLINE_DATA_DIR, "sessions", "*", "*.messages.json")),
+                       key=os.path.getmtime, reverse=True)
+        if files:
+            return os.path.basename(os.path.dirname(files[0]))
     return None
 
 
@@ -54,6 +60,9 @@ def resolve_full_id(agent, sid_prefix):
     elif agent == "agy":
         matches = [os.path.basename(p)[:-3] for p in glob.glob(os.path.join(AGY_CONV_DIR, "*.db"))
                    if sid_prefix in os.path.basename(p)]
+    elif agent == "cline":
+        matches = [os.path.basename(os.path.dirname(p)) for p in glob.glob(os.path.join(CLINE_DATA_DIR, "sessions", "*", "*.messages.json"))
+                   if sid_prefix in os.path.basename(os.path.dirname(p))]
     else:
         matches = []
     
@@ -154,7 +163,9 @@ def inject_to_agy(session_id, is_new, prompt, timeout_sec=120):
     cmd = ["/root/.local/bin/agy", "-p", "--dangerously-skip-permissions"]
     if session_id and not is_new:
         cmd.extend(["--conversation", session_id])
-    cmd.append(prompt)
+    # agy CLI 要求 prompt 以 -p='<prompt>' 形式附着在 flag 上，
+    # 否则 -p 会把紧随其后的 --dangerously-skip-permissions 当作 prompt。
+    cmd.append(f"-p={prompt}")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
         return proc.returncode, proc.stdout, proc.stderr
@@ -162,10 +173,22 @@ def inject_to_agy(session_id, is_new, prompt, timeout_sec=120):
         return 124, "", f"agy 执行超时 ({timeout_sec}s)"
 
 
+def inject_to_cline(session_id, is_new, prompt, timeout_sec=120):
+    cmd = ["cline", "--auto-approve", "true"]
+    if session_id and not is_new:
+        cmd.extend(["--id", session_id])
+    cmd.append(prompt)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", f"cline 执行超时 ({timeout_sec}s)"
+
+
 def main():
     p = argparse.ArgumentParser(description="跨 Agent 会话注入与协作工具")
-    p.add_argument("--to", required=True, choices=["qoder", "codebuddy", "agy"],
-                   help="目标 Agent (qoder / codebuddy / agy)")
+    p.add_argument("--to", required=True, choices=["qoder", "codebuddy", "agy", "cline"],
+                   help="目标 Agent (qoder / codebuddy / agy / cline)")
     p.add_argument("--from-agent", default="agy", help="发送方 Agent 名称 (默认 agy)")
     p.add_argument("--session", "-s", help="目标会话 ID（前缀即可）")
     p.add_argument("--latest", "-l", action="store_true", help="注入到目标 Agent 的最新活跃会话")
@@ -218,6 +241,8 @@ def main():
         code, out, err = inject_to_qoder(target_sid, is_new, full_prompt, timeout_sec=args.timeout)
     elif args.to == "agy":
         code, out, err = inject_to_agy(target_sid, is_new, full_prompt, timeout_sec=args.timeout)
+    elif args.to == "cline":
+        code, out, err = inject_to_cline(target_sid, is_new, full_prompt, timeout_sec=args.timeout)
 
     elapsed = time.time() - t0
     print(f"[*] 注入完成，耗时 {elapsed:.1f}s (退出码: {code})")
@@ -240,6 +265,9 @@ def main():
         elif args.to == "agy":
             resume_cmd = f"agy --conversation {target_sid}"
             view_cmd = f"python3 /root/agy-log-viewer.py {target_sid[:8]}"
+        elif args.to == "cline":
+            resume_cmd = f"cline --id {target_sid} -i"
+            view_cmd = f"python3 /root/cline-log-viewer.py {target_sid}"
         
         print(f"\n💡 后续操作提示：")
         print(f"  - 交互接管该会话: `{resume_cmd}`")
