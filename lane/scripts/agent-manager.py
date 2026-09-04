@@ -232,8 +232,8 @@ def restore_session(sid):
     return False
 
 
-def clean_empty_sessions(dry_run=False, force=False):
-    """扫描并清理所有 0 步空会话及 (/clear), (/resume) 等控制指令残留"""
+def clean_empty_sessions(dry_run=False, force=False, max_kb=20):
+    """扫描并清理所有 0 步空会话、(/clear) 控制指令残留，以及体积小于 max_kb (默认 20KB) 的轻量会话"""
     # 动态加载查看器提取标题与元数据
     spec = importlib.util.spec_from_file_location("log_viewer", "/root/agent-log-viewer.py")
     lv = importlib.util.module_from_spec(spec)
@@ -252,25 +252,32 @@ def clean_empty_sessions(dry_run=False, force=False):
 
     meta = load_meta()
     noisy_list = []
+    max_bytes = max_kb * 1024
     for s in all_sessions:
         sid = s["sid"]
         title = s["title"]
         m = meta.get(sid, {})
         if m.get("pinned"):  # 置顶的手工保留
             continue
-        if title == "(空会话)" or (title.startswith("(/") and title.endswith(")")):
+        size_bytes = s.get("size_bytes", 0)
+        is_empty_or_cmd = title == "(空会话)" or (title.startswith("(/") and title.endswith(")"))
+        is_small = size_bytes < max_bytes
+
+        if is_empty_or_cmd or is_small:
+            reason = f"体积<{max_kb}KB({s.get('size_str')})" if is_small else "空会话/指令"
+            s["clean_reason"] = reason
             noisy_list.append(s)
 
     if not noisy_list:
-        print("[*] 太棒了！当前没有任何无用或空的残留会话。")
+        print(f"[*] 太棒了！当前没有任何无用、空会话或小于 {max_kb}KB 的残留会话。")
         return 0
 
     mode_str = "[预览模式]" if dry_run else ("[彻底销毁模式]" if force else "[回收站软删除模式]")
-    print(f"[*] 发现 {len(noisy_list)} 个无用/空会话 {mode_str}:")
-    print("-" * 90)
+    print(f"[*] 发现 {len(noisy_list)} 个无用/空/小于{max_kb}KB 会话 {mode_str}:")
+    print("-" * 110)
     for s in noisy_list:
-        print(f"  - [{s['agent']:<9}] {s['ws']:<18} {s['title']:<12} ID: {s['sid']}")
-    print("-" * 90)
+        print(f"  - [{s['agent']:<9}] {s['ws']:<18} {s.get('size_str','-'):<8} {s['title'][:22]:<22} ({s.get('clean_reason')}) ID: {s['sid']}")
+    print("-" * 110)
 
     if dry_run:
         print(f"[*] 预览完毕，共 {len(noisy_list)} 条记录待清理。加上 --empty 即可执行真实清理。")
@@ -281,7 +288,7 @@ def clean_empty_sessions(dry_run=False, force=False):
         delete_session(s["sid"], force=force)
         cleaned_count += 1
 
-    print(f"[+] 清理完成！共处理 {cleaned_count} 个垃圾会话。")
+    print(f"[+] 清理完成！共处理 {cleaned_count} 个垃圾/微型会话。")
     return cleaned_count
 
 
@@ -335,8 +342,9 @@ def main():
     p_res.add_argument("session", help="会话 ID")
 
     p_clean = sub.add_parser("clean", help="批量清道夫")
-    p_clean.add_argument("--empty", action="store_true", help="扫描并清理所有空会话与控制指令残留")
+    p_clean.add_argument("--empty", action="store_true", help="扫描并清理所有空会话、控制指令残留及微型会话")
     p_clean.add_argument("--trash", action="store_true", help="一键清空回收站（彻底物理销毁所有软删除会话）")
+    p_clean.add_argument("--max-kb", type=int, default=20, help="清理体积小于指定 KB 的会话 (默认 20KB)")
     p_clean.add_argument("--dry-run", action="store_true", help="仅预览待清理清单，不实际删除")
     p_clean.add_argument("-f", "--force", action="store_true", help="彻底物理删除，而非软删除")
 
@@ -365,7 +373,7 @@ def main():
         if args.trash:
             clean_trash_sessions(dry_run=args.dry_run)
         elif args.empty:
-            clean_empty_sessions(dry_run=args.dry_run, force=args.force)
+            clean_empty_sessions(dry_run=args.dry_run, force=args.force, max_kb=args.max_kb)
         else:
             p.print_help()
     else:

@@ -849,7 +849,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
     <div class="header-actions">
       <input type="text" id="search" class="search-box" placeholder="搜索会话标题、ID、关键词..." oninput="renderTable()">
-      <button class="btn btn-primary" onclick="cleanEmpty()">🧹 一键清理空会话</button>
+      <button class="btn btn-primary" onclick="cleanEmpty()">🧹 一键清理 (&lt;20KB / 空)</button>
       <button class="btn" onclick="fetchData()">🔄 刷新</button>
     </div>
   </header>
@@ -1708,10 +1708,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     async function cleanEmpty() {
-      if (!confirm("一键扫描并清理所有 0 步空会话与控制指令？")) return;
+      if (!confirm("一键扫描并清理所有 0 步空会话、控制指令及小于 20KB 的微型会话？")) return;
       const res = await fetch('/api/clean-empty', { method: 'POST' });
       const data = await res.json();
-      alert(`清理完成！共清理 ${data.cleaned_count} 个垃圾会话。`);
+      alert(`清理完成！共清理 ${data.cleaned_count} 个微型/空会话。`);
       fetchData();
     }
 
@@ -1893,7 +1893,7 @@ class LanePanelHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/clean-empty":
-            cleaned = mgr.clean_empty_sessions(force=False)
+            cleaned = mgr.clean_empty_sessions(force=False, max_kb=20)
             self.send_json({"ok": True, "cleaned_count": cleaned})
             return
 
