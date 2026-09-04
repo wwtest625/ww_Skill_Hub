@@ -12,6 +12,8 @@ import glob
 import json
 import sqlite3
 import argparse
+import subprocess
+import urllib.request
 import importlib.util
 from datetime import datetime
 
@@ -21,6 +23,7 @@ AGY_SUMMARY_DB = "/root/.gemini/antigravity-cli/conversation_summaries.db"
 QODER_PROJ_DIR = "/root/.qoder/projects"
 CB_PROJ_DIR = "/root/.codebuddy/projects"
 CLINE_DATA_DIR = "/root/.cline/data"
+LOCAL_VLLM_URL = "http://127.0.0.1:18080/v1/chat/completions"
 
 
 def load_meta():
@@ -88,6 +91,186 @@ def rename_session(sid, new_title):
     save_meta(meta)
     print(f"[+] [{agent}] 会话 {full_sid[:8]} 标题已更新为: \"{new_title.strip()}\"")
     return True
+
+
+def call_llm_title_generation(snippet_text):
+    """调用本地模型提取简明标题（遵循 Conventional Commit 规范），优先走本地 vLLM，失败时回退到 codebuddy -p"""
+    prompt = (
+        "你是一个会话标题精炼助手。请根据提供的会话内容片段，将其精炼为一个类似 Conventional Git Commit 规范的会话标题。\n\n"
+        "格式严格遵循：\n"
+        "<type>(<scope>): <简明中文任务描述>\n\n"
+        "规范要求：\n"
+        "1. <type> 必须是以下之一：\n"
+        "   - feat: 新增功能、新需求开发、搭建系统\n"
+        "   - fix: 修复 Bug、错误纠正\n"
+        "   - debug: 排障诊断、问题定位、分析排查\n"
+        "   - perf: 性能压测、推理优化、显存监控\n"
+        "   - test: 功能测试、验证跑通、代码评测\n"
+        "   - refactor: 代码重构、结构调整\n"
+        "   - docs: 文档梳理、方案设计、新手指南\n"
+        "   - chore: 环境配置、依赖安装、日常清理、进程操作\n"
+        "2. <scope> 代表所属项目、组件或技术栈（全小写英文或技术简称，如 herdr, redfish, vllm, agy, gpu, panel, demo 等）\n"
+        "3. 描述必须是简明清晰的中文，字数控制在 6 到 14 个汉字之间\n"
+        "4. 严禁包含引号、思考过程、前缀说明或多余解释，只输出单行标题！\n\n"
+        f"会话内容片段：\n{snippet_text[:800]}\n"
+    )
+
+    # 1. 优先尝试本地 vLLM (Qwen3.8-27B)
+    try:
+        data = {
+            "model": "Qwen3.8-27B",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "max_tokens": 40
+        }
+        req = urllib.request.Request(
+            LOCAL_VLLM_URL,
+            data=json.dumps(data).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer local"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            res = json.loads(resp.read().decode("utf-8"))
+            raw = res["choices"][0]["message"]["content"].strip()
+            title = clean_generated_title(raw)
+            if title:
+                return title
+    except Exception:
+        pass
+
+    # 2. 兜底尝试 codebuddy -p (glm-5.3-flash)
+    try:
+        proc = subprocess.run(
+            ["timeout", "15", "/root/.local/bin/codebuddy", "-p", prompt],
+            capture_output=True, text=True, timeout=16
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            raw = proc.stdout.strip().splitlines()[-1]
+            title = clean_generated_title(raw)
+            if title:
+                return title
+    except Exception:
+        pass
+
+    return None
+
+
+def clean_generated_title(raw):
+    if not raw:
+        return ""
+    import re
+    t = raw.strip().strip('"\'`“”‘’')
+    t = re.sub(r"^(标题|推荐标题|会话标题|新标题)[:：]\s*", "", t)
+    t = t.splitlines()[0].strip()
+    return t[:48]
+
+
+def get_session_snippet(agent, sid, path):
+    """提取会话前部关键摘要用于生成标题"""
+    cmd = ["python3"]
+    if agent == "agy":
+        cmd.extend(["/root/agy-log-viewer.py", path, "-s", "-T"])
+    elif agent == "qoder":
+        cmd.extend(["/root/qoder-log-viewer.py", path, "-s"])
+    elif agent == "codebuddy":
+        cmd.extend(["/root/codebuddy-log-viewer.py", path, "-s"])
+    elif agent == "cline":
+        cmd.extend(["/root/cline-log-viewer.py", path, "-s", "-T"])
+    else:
+        return ""
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        text = proc.stdout or proc.stderr or ""
+        return text[:1000].strip()
+    except Exception:
+        return ""
+
+
+def retitle_session(sid, dry_run=False):
+    agent, full_sid, path = resolve_session(sid)
+    if not full_sid:
+        print(f"[-] 未找到会话: {sid}")
+        return False, "", ""
+    
+    meta = load_meta()
+    old_title = meta.get(full_sid, {}).get("title", "")
+    
+    snippet = get_session_snippet(agent, full_sid, path)
+    if not snippet:
+        print(f"[-] 无法读取会话 {full_sid[:8]} 的内容摘要。")
+        return False, old_title, ""
+    
+    new_title = call_llm_title_generation(snippet)
+    if not new_title:
+        print(f"[-] AI 标题生成失败（请确认 vLLM 或 CodeBuddy 可用）。")
+        return False, old_title, ""
+
+    if dry_run:
+        print(f"[*] [预览模式] [{agent}] {full_sid[:8]}: \"{old_title}\" ➔ \"{new_title}\"")
+        return True, old_title, new_title
+
+    entry = meta.setdefault(full_sid, {})
+    if not entry.get("original_title"):
+        entry["original_title"] = old_title
+    entry["title"] = new_title
+    entry["ai_titled"] = True
+    entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    save_meta(meta)
+    print(f"[+] [{agent}] 会话 {full_sid[:8]} 已智能重命名:")
+    print(f"    原标题: \"{old_title}\"")
+    print(f"    新标题: \"{new_title}\"")
+    return True, old_title, new_title
+
+
+def batch_retitle_sessions(agent_filter="all", limit=20, dry_run=False, force=False):
+    """批量对含糊/未命名的会话进行 AI 智能重命名"""
+    spec = importlib.util.spec_from_file_location("log_viewer", "/root/agent-log-viewer.py")
+    lv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lv)
+
+    meta = load_meta()
+    all_sessions = []
+    if agent_filter in ("all", "agy"):
+        mod = lv.load_module_from_file("agy_mod", "/root/agy-log-viewer.py")
+        all_sessions.extend(lv.get_agy_sessions(mod))
+    if agent_filter in ("all", "qoder"):
+        mod = lv.load_module_from_file("qoder_mod", "/root/qoder-log-viewer.py")
+        all_sessions.extend(lv.get_qoder_sessions(mod))
+    if agent_filter in ("all", "codebuddy"):
+        mod = lv.load_module_from_file("cb_mod", "/root/codebuddy-log-viewer.py")
+        all_sessions.extend(lv.get_cb_sessions(mod))
+    if agent_filter in ("all", "cline"):
+        mod = lv.load_module_from_file("cline_mod", "/root/cline-log-viewer.py")
+        all_sessions.extend(lv.get_cline_sessions(mod))
+
+    candidates = []
+    for s in all_sessions:
+        sid = s["sid"]
+        m = meta.get(sid, {})
+        if m.get("deleted") or m.get("pinned"):
+            continue
+        if lv.is_noisy_session(s.get("title", "")):
+            continue
+        # 如果已经人工/AI改过名且不是强制重新生成，则跳过
+        if not force and (m.get("ai_titled") or m.get("title")):
+            continue
+        candidates.append(s)
+
+    if not candidates:
+        print(f"[*] 太棒了！未发现需要重新命名的会话（共检查 {len(all_sessions)} 个）。")
+        return 0
+
+    to_process = candidates[:limit]
+    print(f"[*] 准备对 {len(to_process)} 个会话进行 AI 智能重命名 (总候选: {len(candidates)}):")
+    print("-" * 80)
+    count = 0
+    for s in to_process:
+        ok, old_t, new_t = retitle_session(s["sid"], dry_run=dry_run)
+        if ok:
+            count += 1
+    print("-" * 80)
+    print(f"[+] 批量处理完成！成功重命名 {count} 个会话。")
+    return count
 
 
 def tag_session(sid, add_tags=None, rm_tags=None):
@@ -348,10 +531,23 @@ def main():
     p_clean.add_argument("--dry-run", action="store_true", help="仅预览待清理清单，不实际删除")
     p_clean.add_argument("-f", "--force", action="store_true", help="彻底物理删除，而非软删除")
 
+    p_title = sub.add_parser("title", help="AI 智能生成高质量规范会话标题")
+    p_title.add_argument("session", nargs="?", help="目标会话 ID（单个）")
+    p_title.add_argument("--all", action="store_true", help="批量处理所有未命名的会话")
+    p_title.add_argument("-a", "--agent", choices=["all", "agy", "qoder", "codebuddy", "cline"], default="all", help="筛选特定 Agent")
+    p_title.add_argument("-n", "--limit", type=int, default=20, help="批量重命名最大数量 (默认 20)")
+    p_title.add_argument("--dry-run", action="store_true", help="仅预览生成的新标题，不实际保存")
+    p_title.add_argument("-f", "--force", action="store_true", help="覆盖已有自定义标题强制重新生成")
+
     args = p.parse_args()
 
     if args.cmd == "rename":
         rename_session(args.session, args.title)
+    elif args.cmd in ("title", "retitle"):
+        if args.all or not args.session:
+            batch_retitle_sessions(agent_filter=args.agent, limit=args.limit, dry_run=args.dry_run, force=args.force)
+        else:
+            retitle_session(args.session, dry_run=args.dry_run)
     elif args.cmd == "tag":
         if args.action == "add":
             tag_session(args.session, add_tags=args.tags)

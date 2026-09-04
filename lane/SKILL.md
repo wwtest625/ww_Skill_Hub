@@ -52,14 +52,16 @@ lane view <会话ID> [-s]      # 查看指定会话对话流或摘要 (-s)
 
 ### 4. 会话管理（改名 / 归类 / 垃圾清理 / 回收站）
 ```bash
-lane rename <ID> "新标题"     # 重命名会话（覆盖原生标题）
+lane title <ID>              # ✨ 本地 AI 智能提取 Git Commit 规范标题
+lane title --all [--dry-run] # ✨ 批量对未命名会话生成规范标题 (Git Commit 风格)
+lane rename <ID> "新标题"     # 手工重命名会话（覆盖原生标题）
 lane tag <ID> add "GPU"      # 给会话打标签/分类
 lane tag <ID> rm "废弃"      # 移除标签
 lane pin <ID> [--off]        # 🌟 置顶 / 取消置顶
 lane archive <ID> [--off]    # 📦 归档 / 取消归档（移出默认列表）
 lane rm <ID> [-f]            # 🗑️ 移入回收站（加 -f 物理粉碎底层文件）
 lane restore <ID>            # ↩️ 从回收站还原会话
-lane clean --empty [--dry-run] # 🧹 批量扫描并清理空会话与控制指令残留
+lane clean --empty [--dry-run] # 🧹 扫描并清理空会话、控制指令及 <20KB 微型会话
 ```
 
 ### 5. 轻量级 Web 控制面板（零外部依赖）

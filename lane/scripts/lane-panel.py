@@ -849,6 +849,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
     <div class="header-actions">
       <input type="text" id="search" class="search-box" placeholder="搜索会话标题、ID、关键词..." oninput="renderTable()">
+      <button class="btn" id="btn-batch-retitle" onclick="batchAiRetitle()" title="通过本地 AI 模型批量为未命名会话生成 Git Commit 规范标题">✨ 批量 AI 命名</button>
       <button class="btn btn-primary" onclick="cleanEmpty()">🧹 一键清理 (&lt;20KB / 空)</button>
       <button class="btn" onclick="fetchData()">🔄 刷新</button>
     </div>
@@ -1548,6 +1549,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
                 <span class="title-text" onclick="previewSession('${s.sid}')">${s.pinned ? '⭐ ' : ''}${escapeHtml(s.title)}</span>
                 <span style="font-size: 11px; color: #58a6ff; cursor:pointer;" onclick="startEditTitle('${s.sid}')" title="修改标题">✏️</span>
                 <span style="font-size: 11px; color: var(--purple); cursor:pointer;" onclick="promptAddTag('${s.sid}')" title="添加标签">🏷️</span>
+                <span style="font-size: 11px; cursor:pointer;" onclick="aiRetitle('${s.sid}', this)" title="AI 智能起名 (Git Commit 风格)">✨</span>
                 ${tagsHtml}
               </div>
             </td>
@@ -1713,6 +1715,48 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const data = await res.json();
       alert(`清理完成！共清理 ${data.cleaned_count} 个微型/空会话。`);
       fetchData();
+    }
+
+    async function aiRetitle(sid, el) {
+      const orig = el ? el.innerText : '✨';
+      if (el) el.innerText = '⏳';
+      try {
+        const res = await fetch('/api/retitle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: sid })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          fetchData();
+        } else {
+          alert('AI 命名失败: ' + (data.error || '未能生成有效标题'));
+          if (el) el.innerText = orig;
+        }
+      } catch (e) {
+        alert('请求异常: ' + e);
+        if (el) el.innerText = orig;
+      }
+    }
+
+    async function batchAiRetitle() {
+      if (!confirm("确定要调用本地 AI 模型批量为当前未命名的会话生成 Git Commit 规范标题吗？")) return;
+      const btn = document.getElementById('btn-batch-retitle');
+      if (btn) btn.innerText = '⏳ 正在生成中...';
+      try {
+        const res = await fetch('/api/batch-retitle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent: currentAgent, limit: 15, force: false })
+        });
+        const data = await res.json();
+        alert(`批量重命名完成！已成功为 ${data.count} 个会话生成规范标题。`);
+        fetchData();
+      } catch (e) {
+        alert('批量重命名失败: ' + e);
+      } finally {
+        if (btn) btn.innerText = '✨ 批量 AI 命名';
+      }
     }
 
     async function previewSession(sid) {
@@ -1890,6 +1934,20 @@ class LanePanelHandler(BaseHTTPRequestHandler):
         if path == "/api/restore":
             mgr.restore_session(data.get("id"))
             self.send_json({"ok": True})
+            return
+
+        if path == "/api/retitle":
+            sid = data.get("id")
+            ok, old_t, new_t = mgr.retitle_session(sid)
+            self.send_json({"ok": ok, "old_title": old_t, "new_title": new_t})
+            return
+
+        if path == "/api/batch-retitle":
+            limit = data.get("limit", 15)
+            agent = data.get("agent", "all")
+            force = data.get("force", False)
+            count = mgr.batch_retitle_sessions(agent_filter=agent, limit=limit, force=force)
+            self.send_json({"ok": True, "count": count})
             return
 
         if path == "/api/clean-empty":
