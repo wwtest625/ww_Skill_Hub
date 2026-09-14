@@ -783,23 +783,29 @@ pub fn main() !void {
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            const out = std.io.getStdOut().writer();
-            try out.print(
-                \\lane-fast: Lightning-fast multi-agent session scanner (built with Zig)
-                \\
+            const stdout = std.io.getStdOut().writer();
+            try stdout.print(
                 \\Usage:
                 \\  lane-fast [-n <N>] [-a <agy|qoder|cb|rea>] [-g <keyword>]... [-w <ws>] [-A]
+                \\  lane-fast search <keyword>... [-n <N>] [-w <ws>] [-a <agent>] [--bench]
+                \\  lane-fast index [--force]
                 \\  lane-fast <SESSION_ID_OR_KEYWORD> [-s]
                 \\  lane-fast bench
+                \\
+                \\Commands:
+                \\  search <keyword>...   Fast full-text search across transcripts using inverted index (< 5ms)
+                \\  index                 Build or incrementally update inverted index (/root/.agent/lane-search.idx)
+                \\  bench                 Run speed benchmark across all search strategies
                 \\
                 \\Options:
                 \\  -n, --limit <N>       Show latest N sessions (default: 25)
                 \\  -a, --agent <NAME>    Filter by agent (agy, qoder, codebuddy, reasonix)
-                \\  -g, --grep <KEYWORD>  Keyword search across transcripts (repeatable for AND match)
+                \\  -g, --grep <KEYWORD>  Keyword search across transcripts (indexed with fallback to grep)
                 \\  -w, --workspace <WS>  Filter by workspace name
                 \\  -A, --all             Include empty/slash-command sessions
                 \\  -s, --summary         Summary mode when inspecting a session
-                \\  bench                 Run speed benchmark
+                \\  --force, -f           Force full rebuild of index (used with 'index')
+                \\  --bench               Print precise elapsed search time
                 \\
             , .{});
             return;

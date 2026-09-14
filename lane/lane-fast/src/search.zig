@@ -949,13 +949,13 @@ pub fn buildOrUpdateIndex(force: bool, allocator: std.mem.Allocator) !void {
             const t_str = old_idx.file_bytes[t_pos + 2 .. t_pos + 2 + t_len];
             const d_freq = std.mem.readInt(u32, old_idx.file_bytes[t_pos + 2 + t_len .. t_pos + 6 + t_len][0..4], .little);
             const p_offset = std.mem.readInt(u32, old_idx.file_bytes[t_pos + 6 + t_len .. t_pos + 10 + t_len][0..4], .little);
-            const p_len = std.mem.readInt(u32, old_idx.file_bytes[t_pos + 10 + t_len .. t_pos + 14 + t_len][0..4], .little);
+            const p_bytes_len = std.mem.readInt(u32, old_idx.file_bytes[t_pos + 10 + t_len .. t_pos + 14 + t_len][0..4], .little);
 
             const doc_ids = try old_idx.decodePostings(.{
                 .term = t_str,
                 .doc_freq = d_freq,
                 .posting_offset = p_offset,
-                .posting_bytes_len = p_len,
+                .posting_bytes_len = p_bytes_len,
             }, allocator);
             defer allocator.free(doc_ids);
 
@@ -968,26 +968,35 @@ pub fn buildOrUpdateIndex(force: bool, allocator: std.mem.Allocator) !void {
             }
         }
 
+        // 遍历所有当前会话
         for (current_sessions.items) |sess| {
-            var tokens = std.ArrayList([]const u8).init(allocator);
-            var reused = false;
             if (old_map.get(sess.path)) |old_d_id| {
                 if (old_idx.getDocMeta(old_d_id)) |old_d| {
                     if (old_d.mtime == sess.mtime and old_d.size_bytes == sess.size_bytes) {
-                        if (doc_tokens_map.get(old_d_id)) |tok_list| {
-                            for (tok_list.items) |t| {
-                                try tokens.append(try allocator.dupe(u8, t));
-                            }
-                            reused = true;
+                        // 未变动，复用旧 tokens
+                        if (doc_tokens_map.get(old_d_id)) |old_tokens| {
+                            try build_items.append(.{
+                                .meta = .{
+                                    .agent = sess.agent,
+                                    .sid = sess.sid,
+                                    .mtime = sess.mtime,
+                                    .time_str = sess.time_str,
+                                    .ws = sess.ws,
+                                    .size_bytes = sess.size_bytes,
+                                    .title = sess.title,
+                                    .path = sess.path,
+                                },
+                                .tokens = old_tokens,
+                            });
+                            continue;
                         }
                     }
                 } else |_| {}
             }
 
-            if (!reused) {
-                try extractSessionTokens(sess.agent, sess.sid, sess.path, sess.title, &tokens, allocator);
-            }
-
+            // 新增或变动，重新提取 tokens
+            var tokens = std.ArrayList([]const u8).init(allocator);
+            try extractSessionTokens(sess.agent, sess.sid, sess.path, sess.title, &tokens, allocator);
             try build_items.append(.{
                 .meta = .{
                     .agent = sess.agent,
@@ -1003,12 +1012,11 @@ pub fn buildOrUpdateIndex(force: bool, allocator: std.mem.Allocator) !void {
             });
         }
     } else {
-        try stdout.print("\x1b[36m[lane-search] 全量构建索引 (共 {d} 个会话)...\x1b[0m\n", .{current_sessions.items.len});
-
+        // 全量构建
+        try stdout.print("\x1b[36m[lane-search] 全量构建倒排索引 (扫描 {d} 个会话)...\x1b[0m\n", .{current_sessions.items.len});
         for (current_sessions.items) |sess| {
             var tokens = std.ArrayList([]const u8).init(allocator);
             try extractSessionTokens(sess.agent, sess.sid, sess.path, sess.title, &tokens, allocator);
-
             try build_items.append(.{
                 .meta = .{
                     .agent = sess.agent,
@@ -1053,8 +1061,8 @@ pub fn searchWithIndex(
         const kw_lower = kw_lower_buf[0..raw_kw.len];
 
         const term_rec = loaded.findTerm(kw_lower) orelse {
-            const empty_list = std.ArrayList(main.SessionItem).init(allocator);
-            return empty_list;
+            // 未命中词项：返回 null，让外层自动回退到传统 grep 流式扫描
+            return null;
         };
 
         const post = loaded.decodePostings(term_rec, allocator) catch return null;
