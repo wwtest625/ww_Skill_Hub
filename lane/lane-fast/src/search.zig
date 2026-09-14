@@ -204,19 +204,21 @@ pub const LoadedIndex = struct {
         std.posix.munmap(self.file_bytes);
     }
 
-    /// 二分查找 Term (微秒级零内存拷贝)
+    /// 二分查找 Term (微秒级零内存拷贝，全链路边界断言)
     pub fn findTerm(self: *const LoadedIndex, target_kw: []const u8) ?TermRecord {
         if (self.header.num_terms == 0) return null;
         var low: usize = 0;
         var high: usize = self.header.num_terms;
         while (low < high) {
             const mid = low + (high - low) / 2;
-            const t_pos: usize = @intCast(self.header.terms_data_offset + self.terms_offsets[mid]);
-            if (t_pos + 2 > self.header.postings_offset) return null;
+            if (mid >= self.terms_offsets.len) return null;
+            const t_off = self.terms_offsets[mid];
+            const t_pos: usize = @intCast(self.header.terms_data_offset + t_off);
+            if (t_pos + 2 > self.header.postings_offset or t_pos + 2 > self.file_bytes.len) return null;
             const t_len = std.mem.readInt(u16, self.file_bytes[t_pos .. t_pos + 2][0..2], .little);
             const t_str_start = t_pos + 2;
             const t_str_end = t_str_start + t_len;
-            if (t_str_end + 12 > self.header.postings_offset) return null;
+            if (t_str_end + 12 > self.header.postings_offset or t_str_end + 12 > self.file_bytes.len) return null;
             const t_str = self.file_bytes[t_str_start..t_str_end];
 
             const cmp = std.mem.order(u8, target_kw, t_str);
@@ -239,10 +241,11 @@ pub const LoadedIndex = struct {
         return null;
     }
 
-    /// 解码指定 Term 的倒排链 (有序 docIDs)
+    /// 解码指定 Term 的倒排链 (有序 docIDs，全链路边界断言)
     pub fn decodePostings(self: *const LoadedIndex, term_rec: TermRecord, allocator: std.mem.Allocator) ![]u32 {
         var list = try allocator.alloc(u32, term_rec.doc_freq);
         const p_start: usize = @intCast(self.header.postings_offset + term_rec.posting_offset);
+        if (p_start > self.file_bytes.len) return error.CorruptIndex;
         const p_end: usize = p_start + term_rec.posting_bytes_len;
         if (p_end > self.file_bytes.len) return error.CorruptIndex;
         const p_slice = self.file_bytes[p_start..p_end];
@@ -258,11 +261,11 @@ pub const LoadedIndex = struct {
         return list;
     }
 
-    /// 解码单个文档的元数据
+    /// 解码单个文档的元数据 (全链路边界断言)
     pub fn getDocMeta(self: *const LoadedIndex, doc_id: u32) !DocMetadata {
-        if (doc_id >= self.header.num_docs) return error.CorruptIndex;
+        if (doc_id >= self.header.num_docs or doc_id >= self.docs_offsets.len) return error.CorruptIndex;
         var d_cursor: usize = @intCast(self.header.docs_data_offset + self.docs_offsets[doc_id]);
-        if (d_cursor + 24 > self.header.terms_idx_offset) return error.CorruptIndex;
+        if (d_cursor + 24 > self.header.terms_idx_offset or d_cursor + 24 > self.file_bytes.len) return error.CorruptIndex;
 
         const mtime = std.mem.readInt(i128, self.file_bytes[d_cursor .. d_cursor + 16][0..16], .little);
         d_cursor += 16;
@@ -274,11 +277,11 @@ pub const LoadedIndex = struct {
         meta.size_bytes = size_bytes;
 
         inline for (.{ "agent", "sid", "ws", "title", "time_str", "path" }) |field| {
-            if (d_cursor + 2 > self.header.terms_idx_offset) return error.CorruptIndex;
+            if (d_cursor + 2 > self.header.terms_idx_offset or d_cursor + 2 > self.file_bytes.len) return error.CorruptIndex;
             const str_len = std.mem.readInt(u16, self.file_bytes[d_cursor .. d_cursor + 2][0..2], .little);
             if (str_len > 1024) return error.CorruptIndex;
             d_cursor += 2;
-            if (d_cursor + str_len > self.header.terms_idx_offset) return error.CorruptIndex;
+            if (d_cursor + str_len > self.header.terms_idx_offset or d_cursor + str_len > self.file_bytes.len) return error.CorruptIndex;
             const s = self.file_bytes[d_cursor .. d_cursor + str_len];
             d_cursor += str_len;
             @field(meta, field) = s;
@@ -288,7 +291,7 @@ pub const LoadedIndex = struct {
     }
 };
 
-/// 严格校验并打开索引文件 (带损坏容错与零拷贝 mmap)
+/// 严格校验并打开索引文件 (带 Adler32 全文校验、损坏容错与零拷贝 mmap)
 pub fn openIndex(path: []const u8) ?LoadedIndex {
     const file = std.fs.openFileAbsolute(path, .{}) catch return null;
     defer file.close();
@@ -312,21 +315,32 @@ pub fn openIndex(path: []const u8) ?LoadedIndex {
     if (!std.mem.eql(u8, &header.magic, &MAGIC)) return null;
     if (header.version != CURRENT_VERSION) return null;
 
-    // 结构偏移严格递增且边界不越界
-    if (header.docs_idx_offset > header.docs_data_offset or
-        header.docs_data_offset > header.terms_idx_offset or
-        header.terms_idx_offset > header.terms_data_offset or
-        header.terms_data_offset > header.postings_offset or
-        header.postings_offset > stat.size)
+    // 所有 Header 偏移量严格以 file_bytes.len 为绝对上限防越界
+    if (header.docs_idx_offset > file_bytes.len or
+        header.docs_data_offset > file_bytes.len or
+        header.terms_idx_offset > file_bytes.len or
+        header.terms_data_offset > file_bytes.len or
+        header.postings_offset > file_bytes.len)
     {
         return null;
     }
 
-    // 偏移表大小检查
+    // 结构偏移严格单调递增
+    if (header.docs_idx_offset > header.docs_data_offset or
+        header.docs_data_offset > header.terms_idx_offset or
+        header.terms_idx_offset > header.terms_data_offset or
+        header.terms_data_offset > header.postings_offset)
+    {
+        return null;
+    }
+
+    // 偏移表大小检查 (严格限制在 file_bytes.len 之内)
     const docs_idx_len: usize = @intCast(header.num_docs * 4);
     const terms_idx_len: usize = @intCast(header.num_terms * 4);
-    if (header.docs_idx_offset + docs_idx_len > header.docs_data_offset) return null;
-    if (header.terms_idx_offset + terms_idx_len > header.terms_data_offset) return null;
+    if (header.docs_idx_offset + docs_idx_len > header.docs_data_offset or
+        header.docs_idx_offset + docs_idx_len > file_bytes.len) return null;
+    if (header.terms_idx_offset + terms_idx_len > header.terms_data_offset or
+        header.terms_idx_offset + terms_idx_len > file_bytes.len) return null;
 
     const docs_idx_start: usize = @intCast(header.docs_idx_offset);
     const docs_offsets_bytes = file_bytes[docs_idx_start .. docs_idx_start + docs_idx_len];
@@ -346,6 +360,19 @@ pub fn openIndex(path: []const u8) ?LoadedIndex {
         if (terms_offsets[0] != 0 or terms_offsets[header.num_terms - 1] >= (header.postings_offset - header.terms_data_offset)) {
             return null;
         }
+    }
+
+    // 真实现 Adler32 数据区校验和验证 (若损坏或被 dd 覆写，拒收并触发 fallback)
+    if (header.checksum != 0) {
+        const data_bytes = file_bytes[@sizeOf(IndexHeader)..];
+        var h = std.hash.Adler32.init();
+        h.update(data_bytes);
+        if (h.final() != header.checksum) {
+            return null;
+        }
+    } else {
+        // checksum 恒为 0 视为无效未校验索引，触发全量重建/fallback
+        return null;
     }
 
     return LoadedIndex{
@@ -532,6 +559,16 @@ pub fn writeIndexFile(
     while ((final_buf.items.len % 4) != 0) try final_buf.append(0);
     try final_buf.appendSlice(postings_buf.items);
 
+    // 计算 Header 之后数据区的 Adler32 真实校验和
+    const data_bytes = final_buf.items[@sizeOf(IndexHeader)..];
+    var h = std.hash.Adler32.init();
+    h.update(data_bytes);
+    const computed_checksum = h.final();
+
+    // 回填至 Header 中的 checksum 字段
+    const csum_offset = @offsetOf(IndexHeader, "checksum");
+    std.mem.writeInt(u32, final_buf.items[csum_offset .. csum_offset + 4][0..4], computed_checksum, .little);
+
     const dir_path = std.fs.path.dirname(target_path) orelse "/root/.agent";
     std.fs.makeDirAbsolute(dir_path) catch {};
 
@@ -543,6 +580,7 @@ pub fn writeIndexFile(
     f.close();
 
     try std.fs.renameAbsolute(tmp_path, target_path);
+    clearIndexDirty();
 }
 
 /// 提取单个会话的全部文本 tokens
@@ -884,6 +922,26 @@ fn scanDirJsonlMeta(
     }
 }
 
+pub const DIRTY_MARK_PATH = "/root/.agent/.lane-search.dirty";
+
+pub fn markIndexDirty() void {
+    const file = std.fs.createFileAbsolute(DIRTY_MARK_PATH, .{}) catch return;
+    defer file.close();
+    var buf: [32]u8 = undefined;
+    const ts_str = std.fmt.bufPrint(&buf, "{d}\n", .{std.time.milliTimestamp()}) catch return;
+    file.writeAll(ts_str) catch {};
+}
+
+pub fn isIndexDirty() bool {
+    const file = std.fs.openFileAbsolute(DIRTY_MARK_PATH, .{}) catch return false;
+    file.close();
+    return true;
+}
+
+pub fn clearIndexDirty() void {
+    std.fs.deleteFileAbsolute(DIRTY_MARK_PATH) catch {};
+}
+
 /// 构建或增量更新倒排索引 (支持按段增量、mtime变动检测与合并)
 pub fn buildOrUpdateIndex(force: bool, allocator: std.mem.Allocator) !void {
     const stdout = std.io.getStdOut().writer();
@@ -895,6 +953,13 @@ pub fn buildOrUpdateIndex(force: bool, allocator: std.mem.Allocator) !void {
     var old_idx_opt = if (!force) openIndex(INDEX_PATH) else null;
     defer {
         if (old_idx_opt) |*old_idx| old_idx.deinit();
+    }
+
+    if (!force and old_idx_opt == null) {
+        if (std.fs.openFileAbsolute(INDEX_PATH, .{})) |f| {
+            f.close();
+            try stdout.print("\x1b[33m[lane-search] 现有索引校验失败或已损坏，自动降级全量重建...\x1b[0m\n", .{});
+        } else |_| {}
     }
 
     var build_items = std.ArrayList(BuildDocItem).init(allocator);
@@ -1225,4 +1290,58 @@ test "index build and search roundtrip" {
     const zh_postings = try loaded.decodePostings(zh_rec.?, allocator);
     defer allocator.free(zh_postings);
     try std.testing.expectEqualSlices(u32, &[_]u32{1}, zh_postings);
+}
+
+test "index checksum verification and corruption rejection" {
+    const allocator = std.testing.allocator;
+    const tmp_file = "/tmp/test_checksum.idx";
+    defer std.fs.deleteFileAbsolute(tmp_file) catch {};
+
+    var doc1_tokens = std.ArrayList([]const u8).init(allocator);
+    defer doc1_tokens.deinit();
+    try doc1_tokens.append("testterm");
+
+    const docs = [_]BuildDocItem{
+        .{
+            .meta = .{
+                .agent = "codebuddy",
+                .sid = "01a09afb",
+                .mtime = 1000,
+                .time_str = "2026-09-14 14:00",
+                .ws = "ws",
+                .size_bytes = 100,
+                .title = "test",
+                .path = "/tmp/test.jsonl",
+            },
+            .tokens = doc1_tokens,
+        },
+    };
+
+    try writeIndexFile(tmp_file, &docs, allocator);
+
+    // 正常打开：header.checksum 必须非零且成功打开
+    var loaded = openIndex(tmp_file) orelse return error.TestFailed;
+    try std.testing.expect(loaded.header.checksum != 0);
+    loaded.deinit();
+
+    // 模拟破坏：覆写数据区 1 字节
+    const f = try std.fs.openFileAbsolute(tmp_file, .{ .mode = .read_write });
+    try f.seekTo(100);
+    _ = try f.write(&[_]u8{0xFF});
+    f.close();
+
+    // 损坏后：openIndex 必须拒收返回 null
+    const corrupt_loaded = openIndex(tmp_file);
+    try std.testing.expect(corrupt_loaded == null);
+}
+
+test "index dirty mark lifecycle" {
+    clearIndexDirty();
+    try std.testing.expect(!isIndexDirty());
+
+    markIndexDirty();
+    try std.testing.expect(isIndexDirty());
+
+    clearIndexDirty();
+    try std.testing.expect(!isIndexDirty());
 }

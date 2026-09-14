@@ -1206,6 +1206,11 @@ pub fn main() !void {
         kw_display = stream.getWritten();
     }
 
+    if (grep_keywords.items.len > 0 and list.items.len > 0) {
+        // 传统 fallback 命中，标记索引 dirty，为后续增量重建提供信号
+        search.markIndexDirty();
+    }
+
     try renderSessionList(list.items, limit, kw_display, elapsed_ms, do_bench, false, allocator);
 }
 
