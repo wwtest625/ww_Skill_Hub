@@ -1,41 +1,11 @@
 #!/usr/bin/env python3
 """Lane CLI (泳道模式 - 跨 Agent 协同总线)
 
-用法:
-  # 1. 跨泳道派活（自动注入到目标 Agent 最新会话）
-  lane qoder "我是 agy，已写好后端，请进行前端 UI 测试"
-  lane codebuddy "请对 /root/demo.py 进行代码审查"
-  lane agy "继续排查内存泄漏问题"
-
-  # 2. 精准会话注入
-  lane inject --to qoder --session <ID> --intent "UI测试" --msg "任务说明"
-  lane inject --to codebuddy --new --intent "新建任务" --msg "任务说明"
-
-  # 3. 会话查看与全局检索
-  lane                         # 查看最近有效会话
-  lane -w metax-workbench      # 按工作空间筛选
-  lane -t GPU                  # 按标签筛选
-  lane -g "关键词"              # 全局跨 Agent 搜索
-  lane -A                      # 查看全量会话（包含空会话/控制指令）
-  lane --trash                 # 查看回收站中的会话
-  lane --archived              # 查看已归档会话
-  lane view <会话ID> [-s]      # 查看指定会话详情 / 摘要
-
-  # 4. 会话管理（删除/重命名/打标/归档/清理）
-  lane rename <ID> "新标题"     # 重命名会话
-  lane tag <ID> add "GPU"      # 添加标签
-  lane tag <ID> rm "废弃"      # 移除标签
-  lane pin <ID> [--off]        # 置顶 / 取消置顶
-  lane archive <ID> [--off]    # 归档 / 取消归档
-  lane rm <ID> [-f]            # 移入回收站 (加 -f 彻底销毁底层文件)
-  lane restore <ID>            # 从回收站还原
-  lane clean --empty [--dry-run] # 扫描并清理空会话与控制指令残留
-
-  # 5. 轻量可视化管理面板
-  lane panel [--port 3457]     # 启动 Web 控制面板
-
-  # 6. 终端接管提示
-  lane resume qoder [ID]       # 快捷唤起/接管命令提示
+架构:
+  - 极速查询引擎: /root/.local/bin/lane-fast (Zig 0.14 原生编译，1.5ms 响应，零运行时开销)
+  - 任务注入中枢: /root/agent-inject.py
+  - 元数据与管理: /root/agent-manager.py
+  - 可视化控制台: /root/lane-panel.py
 """
 import sys
 import os
@@ -46,17 +16,54 @@ AGENT_INJECT = "/root/agent-inject.py"
 AGENT_LOG_VIEWER = "/root/agent-log-viewer.py"
 AGENT_MANAGER = "/root/agent-manager.py"
 LANE_PANEL = "/root/lane-panel.py"
+LANE_FAST = "/root/.local/bin/lane-fast"
+
+
+def is_fast_compatible(argv):
+    """判断当前参数是否可以由 Zig 高性能引擎 (lane-fast) 承载"""
+    if not os.path.isfile(LANE_FAST):
+        return False
+    # 特殊管理参数交由 Python 端
+    manager_flags = {"--trash", "--archived", "-t", "--tag", "--pin", "--dry-run"}
+    for arg in argv:
+        if arg in manager_flags:
+            return False
+    return True
 
 
 def main():
+    # 极速惰性收割（非 bench 模式执行，仅扫近 5 分钟修改文件）
+    if "bench" not in sys.argv:
+        try:
+            sys.path.insert(0, "/root")
+            import lane_harvester
+            lane_harvester.harvest_recent()
+        except Exception:
+            pass
+
+    # 0. 无参数默认极速查看
     if len(sys.argv) == 1:
+        if os.path.isfile(LANE_FAST):
+            subprocess.run([LANE_FAST, "-n", "25"])
+            return
         subprocess.run(["python3", AGENT_LOG_VIEWER, "-n", "20"])
         return
 
     first_arg = sys.argv[1].lower()
 
+    # 显式原生加速：lane fast / lane -F
+    if first_arg in ("fast", "-F"):
+        if os.path.isfile(LANE_FAST):
+            subprocess.run([LANE_FAST] + sys.argv[2:])
+            return
+        else:
+            print("lane-fast 未就绪，fallback 至普通模式")
+            cmd = ["python3", AGENT_LOG_VIEWER] + sys.argv[2:]
+            subprocess.run(cmd)
+            return
+
     # 快捷语法：lane <agent_name> "消息内容"
-    if first_arg in ("qoder", "codebuddy", "agy", "cb"):
+    if first_arg in ("qoder", "codebuddy", "agy", "cb", "cline"):
         agent = "codebuddy" if first_arg == "cb" else first_arg
         if len(sys.argv) < 3:
             print(f"用法: lane {first_arg} \"要发送的任务说明/提示词\"")
@@ -72,8 +79,11 @@ def main():
         subprocess.run(cmd)
         return
 
-    # 日志查看：lane log / lane ls
+    # 日志查看：lane log / lane ls / lane list
     if first_arg in ("log", "logs", "ls", "list"):
+        if is_fast_compatible(sys.argv[2:]):
+            subprocess.run([LANE_FAST] + sys.argv[2:])
+            return
         cmd = ["python3", AGENT_LOG_VIEWER] + sys.argv[2:]
         subprocess.run(cmd)
         return
@@ -83,6 +93,9 @@ def main():
         if len(sys.argv) < 3:
             print("用法: lane view <会话ID> [-s] [-g 关键词]")
             sys.exit(1)
+        if is_fast_compatible(sys.argv[2:]):
+            subprocess.run([LANE_FAST] + sys.argv[2:])
+            return
         cmd = ["python3", AGENT_LOG_VIEWER] + sys.argv[2:]
         subprocess.run(cmd)
         return
@@ -129,6 +142,11 @@ def main():
         subprocess.run(cmd)
         return
 
+    if first_arg in ("title", "retitle"):
+        cmd = ["python3", AGENT_MANAGER, "title"] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
     # 可视化面板
     if first_arg in ("panel", "ui", "web", "dash", "dashboard"):
         cmd = ["python3", LANE_PANEL] + sys.argv[2:]
@@ -138,7 +156,7 @@ def main():
     # 快捷接管：lane resume <agent> [id]
     if first_arg in ("resume", "-r"):
         if len(sys.argv) < 3:
-            print("用法: lane resume <qoder|codebuddy|agy> [会话ID]")
+            print("用法: lane resume <qoder|codebuddy|agy|cline> [会话ID]")
             sys.exit(1)
         agent = sys.argv[2].lower()
         sid = sys.argv[3] if len(sys.argv) > 3 else ""
@@ -148,9 +166,17 @@ def main():
             print(f"👉 运行命令接管: `codebuddy -r {sid}`" if sid else "👉 运行命令接管: `codebuddy -c`")
         elif agent == "agy":
             print(f"👉 运行命令接管: `agy --conversation {sid}`" if sid else "👉 运行命令接管: `agy -c`")
+        elif agent == "cline":
+            print(f"👉 运行命令接管: `cline --id {sid} -i`" if sid else "👉 运行命令接管: `cline -i`")
         return
 
-    # 默认传递给 log-viewer 进行查询或参数过滤
+    # 纯查询与过滤（如 lane -n 10, lane -g vllm, lane -a qoder）优先尝试 Zig 引擎
+    if is_fast_compatible(sys.argv[1:]):
+        res = subprocess.run([LANE_FAST] + sys.argv[1:])
+        if res.returncode == 0:
+            return
+
+    # 默认传递给 agent-log-viewer
     cmd = ["python3", AGENT_LOG_VIEWER] + sys.argv[1:]
     subprocess.run(cmd)
 

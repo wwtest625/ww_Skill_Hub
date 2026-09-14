@@ -233,11 +233,64 @@ def get_qoder_sessions(qoder_mod, grep=None, ws_filter=None, show_all=False):
     return res
 
 
+def load_cb_active_sessions():
+    """读 sessions/*.json 心跳(5分钟内), 经 change-session 链转移得真正活跃会话 -> hb_ms"""
+    import time
+    active = {}
+    now_ms = time.time() * 1000
+    for meta in glob.glob("/root/.codebuddy/sessions/*.json"):
+        try:
+            with open(meta, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            hb = d.get("lastHeartbeat", 0)
+            if now_ms - hb > 5 * 60 * 1000:
+                continue
+            ws_dir = (d.get("cwd", "").strip("/")).replace("/", "-")
+            cur_sid = d.get("sessionId", "")
+            for _ in range(5):
+                ap = os.path.join(CB_PROJ_DIR, ws_dir, cur_sid + ".jsonl")
+                if not os.path.isfile(ap):
+                    break
+                with open(ap, "rb") as f:
+                    f.seek(max(0, os.path.getsize(ap) - 8192))
+                    tail = f.read().decode("utf-8", "ignore")
+                m = re.findall(r"change session ([0-9a-f-]{36})", tail)
+                if not m or m[-1] == cur_sid:
+                    break
+                cur_sid = m[-1]
+            if cur_sid:
+                active[cur_sid] = hb
+        except Exception:
+            continue
+    return active
+
+
+def cb_tail_real_mtime(path):
+    """尾行是 change session 切换痕迹时, 回退为最后一条实质消息时间(epoch 秒)"""
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, os.path.getsize(path) - 8192))
+            tail = f.read().decode("utf-8", "ignore")
+        lines = [l for l in tail.rstrip().split("\n") if l.strip()]
+        if not lines or "<local-command-stdout>" not in lines[-1] or "change session " not in lines[-1]:
+            return None
+        for line in reversed(lines):
+            if "<local-command-stdout>" in line or "command-caveat" in line:
+                continue
+            m = re.search(r'"timestamp":(\d+)', line)
+            if m:
+                return int(m.group(1)) / 1000.0
+    except Exception:
+        pass
+    return None
+
+
 def get_cb_sessions(cb_mod, grep=None, ws_filter=None, show_all=False):
     files = glob.glob(os.path.join(CB_PROJ_DIR, "*", "*.jsonl"))
     res = []
     kw = grep.lower() if grep else None
     wskw = ws_filter.lower() if ws_filter else None
+    active = load_cb_active_sessions()
     for p in files:
         mtime = os.path.getmtime(p)
         ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
@@ -249,6 +302,18 @@ def get_cb_sessions(cb_mod, grep=None, ws_filter=None, show_all=False):
 
         if not show_all and is_noisy_session(title):
             continue
+
+        # change session 污染修正: 切换痕迹刷新的 mtime 回退为真实消息时间
+        real = cb_tail_real_mtime(p)
+        if real and real < mtime:
+            mtime = real
+        # 活跃会话(心跳+链转移): 提升至心跳时间并加 ⚡
+        if sid in active:
+            hb = active[sid] / 1000.0
+            if hb > mtime:
+                mtime = hb
+            title = "⚡ " + title
+        ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
 
         if wskw and wskw not in ws.lower() and wskw not in raw_ws.lower():
             continue
