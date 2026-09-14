@@ -1,9 +1,9 @@
 ---
 name: lane
-version: 2.4.0
+version: 2.5.0
 display_name: "Lane（多 Agent 泳道协同总线与极速会话管理）"
-description: Lane（泳道模式）——五 Agent（agy / Reasonix / qoder / CodeBuddy / Cline）异构协同总线：Zig 0.14 高性能极速检索引擎（lane-fast，1.5ms 毫秒级响应）、跨 Agent 会话注入、多工作区会话查看、会话管理（改名/打标/清理/回收站）、轻量 Web 控制面板、共享基建与避坑规范。触发词：lane、lane-fast、泳道、协作、会话记录、查看记录、会话注入、另一个agent、互通、handoff、黑板、面板、会话管理、清理会话、cline、reasonix
-keywords: lane,lane-fast,zig,泳道,协作,会话注入,agent-inject,qoder,agy,antigravity,codebuddy,cline,reasonix,会话记录,log-viewer,agent-log-viewer,工作区,互通,分工,handoff,黑板,xssh,GPU,会话管理,panel,改名,打标签,清理
+description: Lane（泳道模式）——五 Agent（agy / Reasonix / qoder / CodeBuddy / Cline）异构协同总线：Zig 0.14 高性能极速检索引擎与倒排索引（lane-search P0，1.3ms 极速检索）、跨 Agent 会话注入、多工作区会话查看、会话管理（改名/打标/清理/回收站）、轻量 Web 控制面板、共享基建与避坑规范。触发词：lane、lane-fast、lane-search、泳道、协作、会话记录、查看记录、会话注入、倒排索引、全文搜索、另一个agent、互通、handoff、黑板、面板、会话管理、清理会话、cline、reasonix
+keywords: lane,lane-fast,lane-search,zig,倒排索引,泳道,协作,会话注入,agent-inject,qoder,agy,antigravity,codebuddy,cline,reasonix,会话记录,log-viewer,agent-log-viewer,工作区,互通,分工,handoff,黑板,xssh,GPU,会话管理,panel,改名,打标签,清理
 ---
 
 # 🏊‍♂️ Lane —— 多 Agent 泳道协同与极速会话管理手册
@@ -22,7 +22,7 @@ keywords: lane,lane-fast,zig,泳道,协作,会话注入,agent-inject,qoder,agy,a
 
 ## 二、 CLI 极简速查 (`/root/.local/bin/lane`)
 
-底层集成 **Zig 0.14 原生编译引擎 (`lane-fast`)**，对会话列表与全局关键字搜索提供 **百倍加速（1.5ms ~ 8ms）**。
+底层集成 **Zig 0.14 原生编译引擎 (`lane-fast`)**，内置持久化倒排索引（lane-search P0）与流式扫描，对会话列表与全文检索提供 **毫秒级极速响应（1.3ms ~ 1.8ms）**。
 
 ### 1. 跨泳道派活（自动注入目标 Agent 最新会话）
 ```bash
@@ -44,8 +44,10 @@ lane inject --to codebuddy --new --intent "新建审查" --msg "任务说明"
 lane                         # ⚡ 极速查看最近会话（显示 STAT 状态图标 ✅🔄❌ 与 SUMMARY 摘要卡片）
 lane -n 50                   # 查看最近 50 条会话
 lane -w metax-workbench      # 按项目工作区筛选
-lane -g "关键词"              # ⚡ 全量跨 Agent 全文无缝检索 (跨 256KB 大缓冲滑动无漏检)
-lane -g "词A" -g "词B"       # ⚡ 多关键词 AND 组合检索 (同时包含词A和词B才命中)
+lane -g "关键词"              # ⚡ 全量跨 Agent 极速检索（自动走倒排索引 1.3ms，损坏/缺失时平滑降级 Grep）
+lane -g "词A" -g "词B"       # ⚡ 多关键词 AND 组合检索 (倒排索引求交，同时包含两词才命中)
+lane-fast search <kw>...     # ⚡ 直接调用 Zig 倒排索引引擎查询 (支持多词 AND、-n、-w、--bench)
+lane-fast index [--force]    # 🔨 手动触发倒排索引构建/全量重建 (/root/.agent/lane-search.idx)
 lane view <会话ID/关键词> [-s] # 查看指定会话卡片序列与对话流或摘要 (-s)
 lane -t GPU                  # 按标签筛选 (调用管理引擎)
 lane -A                      # 查看全量会话（包含空会话/控制指令/归档/回收站）
@@ -91,7 +93,12 @@ lane resume cline [ID]       # 智能提示 cline --id <id> -i
 ## 三、 Zig 0.14 极速核心说明 (`lane-fast`)
 
 - **位置**: `/root/.local/bin/lane-fast` (源码位于 `/root/metax-workbench/lane-fast/`)
-- **体积**: 1.3 MB 独立静态二进制，零外部依赖。
+- **体积**: 1.4 MB 独立静态二进制，零外部依赖。
+- **倒排索引引擎 (lane-search P0)**:
+  - **索引文件**: `/root/.agent/lane-search.idx`（LEB128 Varint 压缩 + Delta 编码 + 4 字节严格对齐）；
+  - **零拷贝查询**: `mmap` 配合预建固定宽度偏移表二分查找，纯索引查询耗时 < 0.1ms；
+  - **增量段合并**: 记录 mtime 与 size，变动会话单段提取更新，未变动会话零重复计算；
+  - **自愈与降级**: Header/Data 结构校验与损坏自动容错，故障秒级静默 Fallback 到 Grep 流式扫描。
 - **安全与健壮性**:
   - **Arena Allocator**: 瞬时分配、随进程退出整块释放，零内存碎片与泄漏；
   - **SQLite 优雅解包**: 无论 open 成功与否安全释放句柄，支持只读模式读取 agy 摘要；

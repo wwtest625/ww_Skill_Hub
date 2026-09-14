@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const search = @import("search.zig");
 
 pub const c = struct {
     pub const SQLITE_OK = 0;
@@ -165,7 +166,7 @@ fn printSessionCards(sid: []const u8) void {
     }
 }
 
-fn truncateUtf8Safe(text: []const u8, max_chars: usize) []const u8 {
+pub fn truncateUtf8Safe(text: []const u8, max_chars: usize) []const u8 {
     var count: usize = 0;
     var byte_idx: usize = 0;
     while (byte_idx < text.len and count < max_chars) {
@@ -177,7 +178,7 @@ fn truncateUtf8Safe(text: []const u8, max_chars: usize) []const u8 {
     return text[0..byte_idx];
 }
 
-fn formatEpochSeconds(epoch_sec: i64, buf: []u8) []const u8 {
+pub fn formatEpochSeconds(epoch_sec: i64, buf: []u8) []const u8 {
     if (epoch_sec <= 0) return "1970-01-01 00:00";
     const beijing_sec = epoch_sec + 8 * 3600;
     const epoch_day = @divFloor(beijing_sec, 86400);
@@ -200,7 +201,7 @@ fn formatEpochSeconds(epoch_sec: i64, buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{ year, m, d, hour, minute }) catch "----";
 }
 
-fn cleanWorkspace(raw: []const u8) []const u8 {
+pub fn cleanWorkspace(raw: []const u8) []const u8 {
     var ws = std.mem.trim(u8, raw, " \t\r\n\"'[]");
     if (std.mem.startsWith(u8, ws, "file://")) ws = ws[7..];
     if (std.mem.startsWith(u8, ws, "-")) ws = ws[1..];
@@ -213,7 +214,7 @@ fn cleanWorkspace(raw: []const u8) []const u8 {
 }
 
 /// 读文件尾部最多 buf.len 字节（用于解析 change session 切换痕迹）
-fn readFileTail(path: []const u8, buf: []u8) ?[]const u8 {
+pub fn readFileTail(path: []const u8, buf: []u8) ?[]const u8 {
     const f = std.fs.openFileAbsolute(path, .{}) catch return null;
     defer f.close();
     const size = f.getEndPos() catch return null;
@@ -224,7 +225,7 @@ fn readFileTail(path: []const u8, buf: []u8) ?[]const u8 {
 }
 
 /// 文件最后一条消息是否为 change session 切换控制行
-fn lastLineIsChangeSession(tail: []const u8) bool {
+pub fn lastLineIsChangeSession(tail: []const u8) bool {
     const trimmed = std.mem.trimRight(u8, tail, " \t\r\n");
     if (trimmed.len == 0) return false;
     const line_start = std.mem.lastIndexOfScalar(u8, trimmed, '\n') orelse 0;
@@ -234,7 +235,7 @@ fn lastLineIsChangeSession(tail: []const u8) bool {
 }
 
 /// 从尾部提取最后一个 change session 的目标会话 UUID（36 字符）
-fn extractChangeTarget(tail: []const u8, out: []u8) ?[]const u8 {
+pub fn extractChangeTarget(tail: []const u8, out: []u8) ?[]const u8 {
     const marker = "change session ";
     const idx = std.mem.lastIndexOf(u8, tail, marker) orelse return null;
     const i = idx + marker.len;
@@ -249,7 +250,7 @@ fn extractChangeTarget(tail: []const u8, out: []u8) ?[]const u8 {
 
 /// 尾部最后一条"实质消息"的 timestamp (ms)：逐行倒序，
 /// 跳过 change session 切换痕迹与 command-caveat 控制行
-fn lastRealTimestampMs(tail: []const u8) ?i64 {
+pub fn lastRealTimestampMs(tail: []const u8) ?i64 {
     var iter = std.mem.splitBackwardsScalar(u8, tail, '\n');
     while (iter.next()) |line| {
         if (line.len < 20) continue;
@@ -371,7 +372,7 @@ fn sqliteDbContainsInsensitive(db_path_z: [*:0]const u8, kw: []const u8) bool {
     return false;
 }
 
-fn extractJsonlTitle(path: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+pub fn extractJsonlTitle(path: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     const file = try std.fs.openFileAbsolute(path, .{});
     defer file.close();
 
@@ -576,7 +577,7 @@ fn scanJsonlDir(
 
             const raw_sid = if (f_entry.name.len > 6) f_entry.name[0 .. f_entry.name.len - 6] else f_entry.name;
             const sid = try allocator.dupe(u8, raw_sid);
-            const ws = cleanWorkspace(entry.name);
+            const ws = try allocator.dupe(u8, cleanWorkspace(entry.name));
 
             if (ws_filter) |w| {
                 if (std.mem.indexOf(u8, ws, w) == null) continue;
@@ -631,7 +632,135 @@ fn scanJsonlDir(
     }
 }
 
+fn renderSessionList(
+    items: []const SessionItem,
+    limit: usize,
+    kw_display: []const u8,
+    elapsed_ms: f64,
+    do_bench: bool,
+    is_search: bool,
+    allocator: std.mem.Allocator,
+) !void {
+    const latest_cards = loadLatestLaneCards(allocator);
+    const out = std.io.getStdOut().writer();
+    const display_count = @min(items.len, limit);
+
+    try out.print("\x1b[1;36m{s: <11} {s: <16} {s: <15} {s: <10} {s: <5} {s: <7} {s}\x1b[0m\n", .{ "AGENT", "TIME", "WS", "SID (8位)", "STAT", "SIZE", "SUMMARY / TITLE" });
+    try out.print("{s}\n", .{"-" ** 100});
+
+    var sz_buf: [32]u8 = undefined;
+    for (items[0..display_count]) |item| {
+        const short_sid = if (item.sid.len >= 8) item.sid[0..8] else item.sid;
+        const sz = SessionItem.formatSize(item.size_bytes, &sz_buf);
+
+        const agent_color: []const u8 = if (std.mem.eql(u8, item.agent, "qoder"))
+            "\x1b[35m"
+        else if (std.mem.eql(u8, item.agent, "codebuddy"))
+            "\x1b[32m"
+        else if (std.mem.eql(u8, item.agent, "agy"))
+            "\x1b[34m"
+        else
+            "\x1b[33m";
+
+        const maybe_card = latest_cards.get(item.sid);
+        const stat_icon = if (maybe_card) |card| LaneCard.statusIcon(card.status) else "·";
+
+        var display_title: []const u8 = item.title;
+        if (maybe_card) |card| {
+            if (card.action.len > 0 or card.conclusion.len > 0) {
+                const is_active_prefix = std.mem.startsWith(u8, item.title, "⚡ ");
+                const prefix = if (is_active_prefix) "⚡ " else "";
+                display_title = try std.fmt.allocPrint(allocator, "{s}[{s}] {s}", .{ prefix, card.action, card.conclusion });
+            }
+        }
+        display_title = truncateUtf8Safe(display_title, 42);
+
+        try out.print("{s}[{s: <9}]\x1b[0m \x1b[90m{s: <16}\x1b[0m \x1b[33m{s: <15}\x1b[0m \x1b[36m{s: <10}\x1b[0m {s: <5} \x1b[90m{s: <7}\x1b[0m {s}\n", .{
+            agent_color,
+            item.agent,
+            item.time_str,
+            item.ws,
+            short_sid,
+            stat_icon,
+            sz,
+            display_title,
+        });
+    }
+
+    try out.print("{s}\n", .{"-" ** 96});
+    const tag_label = if (is_search) "Search" else "Grep";
+    if (kw_display.len > 0) {
+        try out.print("\x1b[32m✔ 找到 {d} 条会话 (显示前 {d} 条) [{s}: \"{s}\"] | 耗时: {d:.2} ms\x1b[0m\n", .{ items.len, display_count, tag_label, kw_display, elapsed_ms });
+    } else {
+        try out.print("\x1b[32m✔ 找到 {d} 条会话 (显示前 {d} 条) | 耗时: {d:.2} ms\x1b[0m\n", .{ items.len, display_count, elapsed_ms });
+    }
+
+    if (do_bench) {
+        if (kw_display.len > 0) {
+            if (is_search) {
+                try out.print("\n\x1b[1m[性能基准测试模式]\x1b[0m 极速倒排索引检索 (\"{s}\") 耗时: \x1b[33m{d:.2} ms\x1b[0m\n", .{ kw_display, elapsed_ms });
+            } else {
+                try out.print("\n\x1b[1m[性能基准测试模式]\x1b[0m 深度遍历与 Payload 精确 Grep (\"{s}\") 耗时: \x1b[33m{d:.2} ms\x1b[0m\n", .{ kw_display, elapsed_ms });
+            }
+        } else {
+            try out.print("\n\x1b[1m[性能基准测试模式]\x1b[0m Zig 四 Agent 深度遍历与检索耗时: \x1b[33m{d:.2} ms\x1b[0m\n", .{elapsed_ms});
+        }
+    }
+}
+
+fn runIndexSearch(
+    keywords: []const []const u8,
+    limit: usize,
+    ws_filter: ?[]const u8,
+    target_agent: AgentType,
+    do_bench: bool,
+    start_time: i128,
+    is_search_cmd: bool,
+    allocator: std.mem.Allocator,
+) !bool {
+    const raw_results = (search.searchWithIndex(keywords, allocator) catch return false) orelse return false;
+
+    var filtered = std.ArrayList(SessionItem).init(allocator);
+    for (raw_results.items) |item| {
+        if (ws_filter) |w| {
+            if (std.mem.indexOf(u8, item.ws, w) == null) continue;
+        }
+        if (target_agent != .all) {
+            const ag = AgentType.fromStr(item.agent);
+            if (ag != target_agent) continue;
+        }
+        try filtered.append(item);
+    }
+
+    std.mem.sort(SessionItem, filtered.items, {}, struct {
+        fn lessThan(_: void, a: SessionItem, b: SessionItem) bool {
+            return a.mtime > b.mtime;
+        }
+    }.lessThan);
+
+    const elapsed_ns = std.time.nanoTimestamp() - start_time;
+    const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+
+    var kw_display_buf: [256]u8 = undefined;
+    var kw_display: []const u8 = "";
+    if (keywords.len == 1) {
+        kw_display = keywords[0];
+    } else if (keywords.len > 1) {
+        var stream = std.io.fixedBufferStream(&kw_display_buf);
+        const writer = stream.writer();
+        for (keywords, 0..) |k, idx| {
+            if (idx > 0) try writer.writeAll(" AND ");
+            try writer.writeAll(k);
+        }
+        kw_display = stream.getWritten();
+    }
+
+    try renderSessionList(filtered.items, limit, kw_display, elapsed_ms, do_bench, is_search_cmd, allocator);
+    return true;
+}
+
 pub fn main() !void {
+    const start_time = std.time.nanoTimestamp();
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -648,6 +777,9 @@ pub fn main() !void {
     var do_bench: bool = false;
     var inspect_kw: ?[]const u8 = null;
     var summary_mode: bool = false;
+    var is_index_subcmd: bool = false;
+    var is_search_subcmd: bool = false;
+    var force_index: bool = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -693,15 +825,38 @@ pub fn main() !void {
             summary_mode = true;
         } else if (std.mem.eql(u8, arg, "bench")) {
             do_bench = true;
+        } else if (std.mem.eql(u8, arg, "index")) {
+            is_index_subcmd = true;
+        } else if (std.mem.eql(u8, arg, "search")) {
+            is_search_subcmd = true;
+        } else if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
+            force_index = true;
+        } else if (std.mem.eql(u8, arg, "--bench")) {
+            do_bench = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            inspect_kw = arg;
+            if (is_search_subcmd) {
+                try grep_keywords.append(arg);
+            } else {
+                inspect_kw = arg;
+            }
         } else {
             std.debug.print("未知参数: {s} (使用 -h 查看帮助)\n", .{arg});
             return;
         }
     }
 
-    const start_time = std.time.nanoTimestamp();
+    if (is_index_subcmd) {
+        try search.buildOrUpdateIndex(force_index, allocator);
+        return;
+    }
+
+    if (is_search_subcmd or grep_keywords.items.len > 0) {
+        if (grep_keywords.items.len > 0 and inspect_kw == null) {
+            const ok = runIndexSearch(grep_keywords.items, limit, ws_filter, target_agent, do_bench, start_time, is_search_subcmd, allocator) catch false;
+            if (ok) return;
+        }
+    }
+
     var list = std.ArrayList(SessionItem).init(allocator);
 
     // 0. 读取 CodeBuddy 活跃进程心跳 (/root/.codebuddy/sessions/*.json)
@@ -1031,54 +1186,6 @@ pub fn main() !void {
     const elapsed_ns = std.time.nanoTimestamp() - start_time;
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
 
-    // 加载所有会话的最新里程碑摘要卡片 (微秒级)
-    const latest_cards = loadLatestLaneCards(allocator);
-
-    const out = std.io.getStdOut().writer();
-    const display_count = @min(list.items.len, limit);
-
-    try out.print("\x1b[1;36m{s: <11} {s: <16} {s: <15} {s: <10} {s: <5} {s: <7} {s}\x1b[0m\n", .{ "AGENT", "TIME", "WS", "SID (8位)", "STAT", "SIZE", "SUMMARY / TITLE" });
-    try out.print("{s}\n", .{"-" ** 100});
-
-    var sz_buf: [32]u8 = undefined;
-    for (list.items[0..display_count]) |item| {
-        const short_sid = if (item.sid.len >= 8) item.sid[0..8] else item.sid;
-        const sz = SessionItem.formatSize(item.size_bytes, &sz_buf);
-
-        const agent_color: []const u8 = if (std.mem.eql(u8, item.agent, "qoder"))
-            "\x1b[35m"
-        else if (std.mem.eql(u8, item.agent, "codebuddy"))
-            "\x1b[32m"
-        else if (std.mem.eql(u8, item.agent, "agy"))
-            "\x1b[34m"
-        else
-            "\x1b[33m";
-
-        const maybe_card = latest_cards.get(item.sid);
-        const stat_icon = if (maybe_card) |card| LaneCard.statusIcon(card.status) else "·";
-
-        var display_title: []const u8 = item.title;
-        if (maybe_card) |card| {
-            if (card.action.len > 0 or card.conclusion.len > 0) {
-                const is_active_prefix = std.mem.startsWith(u8, item.title, "⚡ ");
-                const prefix = if (is_active_prefix) "⚡ " else "";
-                display_title = try std.fmt.allocPrint(allocator, "{s}[{s}] {s}", .{ prefix, card.action, card.conclusion });
-            }
-        }
-        display_title = truncateUtf8Safe(display_title, 42);
-
-        try out.print("{s}[{s: <9}]\x1b[0m \x1b[90m{s: <16}\x1b[0m \x1b[33m{s: <15}\x1b[0m \x1b[36m{s: <10}\x1b[0m {s: <5} \x1b[90m{s: <7}\x1b[0m {s}\n", .{
-            agent_color,
-            item.agent,
-            item.time_str,
-            item.ws,
-            short_sid,
-            stat_icon,
-            sz,
-            display_title,
-        });
-    }
-
     var kw_display_buf: [256]u8 = undefined;
     var kw_display: []const u8 = "";
     if (grep_keywords.items.len == 1) {
@@ -1093,20 +1200,7 @@ pub fn main() !void {
         kw_display = stream.getWritten();
     }
 
-    try out.print("{s}\n", .{"-" ** 96});
-    if (kw_display.len > 0) {
-        try out.print("\x1b[32m✔ 找到 {d} 条会话 (显示前 {d} 条) [Grep: \"{s}\"] | 耗时: {d:.2} ms\x1b[0m\n", .{ list.items.len, display_count, kw_display, elapsed_ms });
-    } else {
-        try out.print("\x1b[32m✔ 找到 {d} 条会话 (显示前 {d} 条) | 耗时: {d:.2} ms\x1b[0m\n", .{ list.items.len, display_count, elapsed_ms });
-    }
-
-    if (do_bench) {
-        if (kw_display.len > 0) {
-            try out.print("\n\x1b[1m[性能基准测试模式]\x1b[0m 深度遍历与 Payload 精确 Grep (\"{s}\") 耗时: \x1b[33m{d:.2} ms\x1b[0m\n", .{ kw_display, elapsed_ms });
-        } else {
-            try out.print("\n\x1b[1m[性能基准测试模式]\x1b[0m Zig 四 Agent 深度遍历与检索耗时: \x1b[33m{d:.2} ms\x1b[0m\n", .{elapsed_ms});
-        }
-    }
+    try renderSessionList(list.items, limit, kw_display, elapsed_ms, do_bench, false, allocator);
 }
 
 test "sliceContainsInsensitive basic and case matching" {
@@ -1173,4 +1267,8 @@ test "LaneCard statusIcon mapping" {
     try std.testing.expectEqualStrings("🔄", LaneCard.statusIcon("ongoing"));
     try std.testing.expectEqualStrings("❌", LaneCard.statusIcon("aborted"));
     try std.testing.expectEqualStrings("·", LaneCard.statusIcon("other"));
+}
+
+test {
+    std.testing.refAllDecls(search);
 }
