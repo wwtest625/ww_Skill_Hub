@@ -258,16 +258,16 @@ def main():
     if target_sid:
         if args.to == "qoder":
             resume_cmd = f"qoder -r {target_sid}"
-            view_cmd = f"python3 /root/qoder-log-viewer.py {target_sid[:8]}"
+            view_cmd = f"python3 /root/.agent/scripts/qoder-log-viewer.py {target_sid[:8]}"
         elif args.to == "codebuddy":
             resume_cmd = f"codebuddy -r {target_sid}"
-            view_cmd = f"python3 /root/codebuddy-log-viewer.py {target_sid[:8]}"
+            view_cmd = f"python3 /root/.agent/scripts/codebuddy-log-viewer.py {target_sid[:8]}"
         elif args.to == "agy":
             resume_cmd = f"agy --conversation {target_sid}"
-            view_cmd = f"python3 /root/agy-log-viewer.py {target_sid[:8]}"
+            view_cmd = f"python3 /root/.agent/scripts/agy-log-viewer.py {target_sid[:8]}"
         elif args.to == "cline":
             resume_cmd = f"cline --id {target_sid} -i"
-            view_cmd = f"python3 /root/cline-log-viewer.py {target_sid}"
+            view_cmd = f"python3 /root/.agent/scripts/cline-log-viewer.py {target_sid}"
         
         print(f"\n💡 后续操作提示：")
         print(f"  - 交互接管该会话: `{resume_cmd}`")

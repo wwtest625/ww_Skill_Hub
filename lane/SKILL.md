@@ -49,6 +49,8 @@ lane -g "词A" -g "词B"       # ⚡ 多关键词 AND 组合检索 (倒排索引
 lane-fast search <kw>...     # ⚡ 直接调用 Zig 倒排索引引擎查询 (支持多词 AND、-n、-w、--bench)
 lane-fast index [--force]    # 🔨 手动触发倒排索引构建/全量重建 (/root/.agent/lane-search.idx)
 lane view <会话ID/关键词> [-s] # 查看指定会话卡片序列与对话流或摘要 (-s)
+lane view <会话ID> --full     # 对话流全文输出（关闭 300 字截断；截断时必带「已截断：全文 N 字」标记）
+lane msg <会话ID> <序号> [--line] # ⭐ 取单条消息全文（永不截断）；序号默认按 step_index，--line 按物理行号，两口径自动兜底
 lane -t GPU                  # 按标签筛选 (调用管理引擎)
 lane -A                      # 查看全量会话（包含空会话/控制指令/归档/回收站）
 lane --trash                 # 查看回收站会话

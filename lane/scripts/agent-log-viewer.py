@@ -445,20 +445,20 @@ def main():
         
         cmd = ["python3"]
         if agent_type == "agy":
-            cmd.extend(["/root/agy-log-viewer.py", path])
+            cmd.extend(["/root/.agent/scripts/agy-log-viewer.py", path])
             if args.summary: cmd.append("-s")
             if args.grep: cmd.extend(["-g", args.grep])
             if args.no_thinking: cmd.append("-T")
         elif agent_type == "qoder":
-            cmd.extend(["/root/qoder-log-viewer.py", path])
+            cmd.extend(["/root/.agent/scripts/qoder-log-viewer.py", path])
             if args.summary: cmd.append("-s")
             if args.grep: cmd.extend(["-g", args.grep])
         elif agent_type == "codebuddy":
-            cmd.extend(["/root/codebuddy-log-viewer.py", path])
+            cmd.extend(["/root/.agent/scripts/codebuddy-log-viewer.py", path])
             if args.summary: cmd.append("-s")
             if args.grep: cmd.extend(["-g", args.grep])
         elif agent_type == "cline":
-            cmd.extend(["/root/cline-log-viewer.py", path])
+            cmd.extend(["/root/.agent/scripts/cline-log-viewer.py", path])
             if args.summary: cmd.append("-s")
             if args.grep: cmd.extend(["-g", args.grep])
             if args.no_thinking: cmd.append("-T")
@@ -467,10 +467,10 @@ def main():
         return
 
     # 聚合列表模式
-    agy_mod = load_module_from_file("agy_mod", "/root/agy-log-viewer.py")
-    qoder_mod = load_module_from_file("qoder_mod", "/root/qoder-log-viewer.py")
-    cb_mod = load_module_from_file("cb_mod", "/root/codebuddy-log-viewer.py")
-    cline_mod = load_module_from_file("cline_mod", "/root/cline-log-viewer.py")
+    agy_mod = load_module_from_file("agy_mod", "/root/.agent/scripts/agy-log-viewer.py")
+    qoder_mod = load_module_from_file("qoder_mod", "/root/.agent/scripts/qoder-log-viewer.py")
+    cb_mod = load_module_from_file("cb_mod", "/root/.agent/scripts/codebuddy-log-viewer.py")
+    cline_mod = load_module_from_file("cline_mod", "/root/.agent/scripts/cline-log-viewer.py")
     meta = load_lane_meta()
 
     all_sessions = []

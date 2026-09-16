@@ -168,13 +168,13 @@ def get_session_snippet(agent, sid, path):
     """提取会话前部关键摘要用于生成标题"""
     cmd = ["python3"]
     if agent == "agy":
-        cmd.extend(["/root/agy-log-viewer.py", path, "-s", "-T"])
+        cmd.extend(["/root/.agent/scripts/agy-log-viewer.py", path, "-s", "-T"])
     elif agent == "qoder":
-        cmd.extend(["/root/qoder-log-viewer.py", path, "-s"])
+        cmd.extend(["/root/.agent/scripts/qoder-log-viewer.py", path, "-s"])
     elif agent == "codebuddy":
-        cmd.extend(["/root/codebuddy-log-viewer.py", path, "-s"])
+        cmd.extend(["/root/.agent/scripts/codebuddy-log-viewer.py", path, "-s"])
     elif agent == "cline":
-        cmd.extend(["/root/cline-log-viewer.py", path, "-s", "-T"])
+        cmd.extend(["/root/.agent/scripts/cline-log-viewer.py", path, "-s", "-T"])
     else:
         return ""
 
@@ -224,23 +224,23 @@ def retitle_session(sid, dry_run=False):
 
 def batch_retitle_sessions(agent_filter="all", limit=20, dry_run=False, force=False):
     """批量对含糊/未命名的会话进行 AI 智能重命名"""
-    spec = importlib.util.spec_from_file_location("log_viewer", "/root/agent-log-viewer.py")
+    spec = importlib.util.spec_from_file_location("log_viewer", "/root/.agent/scripts/agent-log-viewer.py")
     lv = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(lv)
 
     meta = load_meta()
     all_sessions = []
     if agent_filter in ("all", "agy"):
-        mod = lv.load_module_from_file("agy_mod", "/root/agy-log-viewer.py")
+        mod = lv.load_module_from_file("agy_mod", "/root/.agent/scripts/agy-log-viewer.py")
         all_sessions.extend(lv.get_agy_sessions(mod))
     if agent_filter in ("all", "qoder"):
-        mod = lv.load_module_from_file("qoder_mod", "/root/qoder-log-viewer.py")
+        mod = lv.load_module_from_file("qoder_mod", "/root/.agent/scripts/qoder-log-viewer.py")
         all_sessions.extend(lv.get_qoder_sessions(mod))
     if agent_filter in ("all", "codebuddy"):
-        mod = lv.load_module_from_file("cb_mod", "/root/codebuddy-log-viewer.py")
+        mod = lv.load_module_from_file("cb_mod", "/root/.agent/scripts/codebuddy-log-viewer.py")
         all_sessions.extend(lv.get_cb_sessions(mod))
     if agent_filter in ("all", "cline"):
-        mod = lv.load_module_from_file("cline_mod", "/root/cline-log-viewer.py")
+        mod = lv.load_module_from_file("cline_mod", "/root/.agent/scripts/cline-log-viewer.py")
         all_sessions.extend(lv.get_cline_sessions(mod))
 
     candidates = []
@@ -418,14 +418,14 @@ def restore_session(sid):
 def clean_empty_sessions(dry_run=False, force=False, max_kb=20):
     """扫描并清理所有 0 步空会话、(/clear) 控制指令残留，以及体积小于 max_kb (默认 20KB) 的轻量会话"""
     # 动态加载查看器提取标题与元数据
-    spec = importlib.util.spec_from_file_location("log_viewer", "/root/agent-log-viewer.py")
+    spec = importlib.util.spec_from_file_location("log_viewer", "/root/.agent/scripts/agent-log-viewer.py")
     lv = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(lv)
 
-    agy_mod = lv.load_module_from_file("agy_mod", "/root/agy-log-viewer.py")
-    qoder_mod = lv.load_module_from_file("qoder_mod", "/root/qoder-log-viewer.py")
-    cb_mod = lv.load_module_from_file("cb_mod", "/root/codebuddy-log-viewer.py")
-    cline_mod = lv.load_module_from_file("cline_mod", "/root/cline-log-viewer.py")
+    agy_mod = lv.load_module_from_file("agy_mod", "/root/.agent/scripts/agy-log-viewer.py")
+    qoder_mod = lv.load_module_from_file("qoder_mod", "/root/.agent/scripts/qoder-log-viewer.py")
+    cb_mod = lv.load_module_from_file("cb_mod", "/root/.agent/scripts/codebuddy-log-viewer.py")
+    cline_mod = lv.load_module_from_file("cline_mod", "/root/.agent/scripts/cline-log-viewer.py")
 
     all_sessions = []
     all_sessions.extend(lv.get_agy_sessions(agy_mod, show_all=True))

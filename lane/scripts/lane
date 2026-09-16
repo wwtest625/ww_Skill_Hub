@@ -2,20 +2,21 @@
 """Lane CLI (泳道模式 - 跨 Agent 协同总线)
 
 架构:
-  - 极速查询引擎: /root/.local/bin/lane-fast (Zig 0.14 原生编译，1.5ms 响应，零运行时开销)
-  - 任务注入中枢: /root/agent-inject.py
-  - 元数据与管理: /root/agent-manager.py
-  - 可视化控制台: /root/lane-panel.py
+  - 极速查询引擎: /root/.local/bin/lane-fast (Zig 0.14 原生编译，1.5ms 响应，零运行时开销；源码 /root/lane-fast)
+  - 任务注入中枢: /root/.agent/scripts/agent-inject.py
+  - 元数据与管理: /root/.agent/scripts/agent-manager.py
+  - 可视化控制台: /root/.agent/scripts/lane-panel.py
 """
 import sys
 import os
 import argparse
 import subprocess
 
-AGENT_INJECT = "/root/agent-inject.py"
-AGENT_LOG_VIEWER = "/root/agent-log-viewer.py"
-AGENT_MANAGER = "/root/agent-manager.py"
-LANE_PANEL = "/root/lane-panel.py"
+SCRIPTS_DIR = "/root/.agent/scripts"
+AGENT_INJECT = f"{SCRIPTS_DIR}/agent-inject.py"
+AGENT_LOG_VIEWER = f"{SCRIPTS_DIR}/agent-log-viewer.py"
+AGENT_MANAGER = f"{SCRIPTS_DIR}/agent-manager.py"
+LANE_PANEL = f"{SCRIPTS_DIR}/lane-panel.py"
 LANE_FAST = "/root/.local/bin/lane-fast"
 
 
@@ -32,15 +33,6 @@ def is_fast_compatible(argv):
 
 
 def main():
-    # 极速惰性收割（非 bench 模式执行，仅扫近 5 分钟修改文件）
-    if "bench" not in sys.argv:
-        try:
-            sys.path.insert(0, "/root")
-            import lane_harvester
-            lane_harvester.harvest_recent()
-        except Exception:
-            pass
-
     # 0. 无参数默认极速查看
     if len(sys.argv) == 1:
         if os.path.isfile(LANE_FAST):

@@ -178,6 +178,277 @@ pub fn truncateUtf8Safe(text: []const u8, max_chars: usize) []const u8 {
     return text[0..byte_idx];
 }
 
+/// 默认的单条消息截断上限（字符数）；`--full` 或 `lane msg` 可绕过
+pub const MSG_TRUNCATE_CHARS: usize = 300;
+
+/// 统计 UTF-8 字符数（非法字节序列按 1 字符计，与 truncateUtf8Safe 口径一致）
+pub fn countUtf8Chars(text: []const u8) usize {
+    var count: usize = 0;
+    var byte_idx: usize = 0;
+    while (byte_idx < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[byte_idx]) catch 1;
+        if (byte_idx + len > text.len) break;
+        byte_idx += len;
+        count += 1;
+    }
+    return count;
+}
+
+/// 从一行 JSON 里解析 "step_index":N（兼容冒号两侧空格；缺失或非数字返回 null）
+pub fn parseStepIndex(line: []const u8) ?u64 {
+    const key = "\"step_index\"";
+    const key_idx = std.mem.indexOf(u8, line, key) orelse return null;
+    var i = key_idx + key.len;
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    if (i >= line.len or line[i] != ':') return null;
+    i += 1;
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    var value: u64 = 0;
+    var digits: usize = 0;
+    while (i < line.len and line[i] >= '0' and line[i] <= '9') : (i += 1) {
+        value = value * 10 + @as(u64, line[i] - '0');
+        digits += 1;
+    }
+    if (digits == 0) return null;
+    return value;
+}
+
+/// 打印消息序号标签：优先用底层 step_index（与 `lane msg` 取值口径一致），物理行号以 (line:N) 附注
+fn printMessageTag(writer: anytype, label: []const u8, style: []const u8, line_no: usize, step: ?u64) !void {
+    if (step) |s| {
+        try writer.print("\x1b[{s}m[{s} #{d}]\x1b[0m\x1b[90m(line:{d})\x1b[0m ", .{ style, label, s, line_no });
+    } else {
+        try writer.print("\x1b[{s}m[{s} #{d}]\x1b[0m ", .{ style, label, line_no });
+    }
+}
+
+/// 打印消息正文：超限时截断并显式标注（全文 X 字 / 已显示前 N 字）；full_mode 时原样输出
+fn printMessageBody(writer: anytype, text: []const u8, full_mode: bool) !void {
+    if (full_mode) {
+        try writer.print("{s}", .{text});
+        return;
+    }
+    const total = countUtf8Chars(text);
+    if (total <= MSG_TRUNCATE_CHARS) {
+        try writer.print("{s}", .{text});
+        return;
+    }
+    try writer.print("{s}\x1b[33m...[已截断：全文 {d} 字，此处仅显示前 {d} 字；用 `lane msg <会话ID> <序号>` 或加 --full 查看全文]\x1b[0m", .{ truncateUtf8Safe(text, MSG_TRUNCATE_CHARS), total, MSG_TRUNCATE_CHARS });
+}
+
+/// 解析位于 text[i..] 的 `\uXXXX` 转义（i 指向 'u'），成功返回码元并置 consumed=6；失败返回 null
+fn parseUnicodeEscapeUnit(text: []const u8, i: usize, out: *u16) bool {
+    if (i + 5 >= text.len or text[i] != 'u') return false;
+    var v: u16 = 0;
+    for (text[i + 1 .. i + 5]) |h| {
+        const d: u16 = switch (h) {
+            '0'...'9' => h - '0',
+            'a'...'f' => h - 'a' + 10,
+            'A'...'F' => h - 'A' + 10,
+            else => return false,
+        };
+        v = v * 16 + d;
+    }
+    out.* = v;
+    return true;
+}
+
+/// 将 jsonl 里切片出的 JSON 转义文本还原为可读文本并流式写入 writer：
+/// \n \t \r \b \f \" \\ \/ 与 \uXXXX（含代理对）→ 实际字符；非法转义原样保留
+fn writeJsonUnescaped(writer: anytype, text: []const u8) !void {
+    var i: usize = 0;
+    while (i < text.len) {
+        const ch = text[i];
+        if (ch != '\\') {
+            try writer.writeByte(ch);
+            i += 1;
+            continue;
+        }
+        if (i + 1 >= text.len) {
+            try writer.writeByte(ch);
+            break;
+        }
+        switch (text[i + 1]) {
+            'n' => try writer.writeByte('\n'),
+            't' => try writer.writeByte('\t'),
+            'r' => try writer.writeByte('\r'),
+            'b' => try writer.writeByte(0x08),
+            'f' => try writer.writeByte(0x0C),
+            '"' => try writer.writeByte('"'),
+            '\\' => try writer.writeByte('\\'),
+            '/' => try writer.writeByte('/'),
+            'u' => {
+                var unit: u16 = 0;
+                if (!parseUnicodeEscapeUnit(text, i + 1, &unit)) {
+                    try writer.writeByte(ch);
+                    i += 1;
+                    continue;
+                }
+                var cp: u21 = unit;
+                var consumed: usize = 6; // \uXXXX
+                if (unit >= 0xD800 and unit <= 0xDBFF) {
+                    // 高代理：尝试合并紧随的低代理
+                    var lo: u16 = 0;
+                    if (i + 7 < text.len and text[i + 6] == '\\' and
+                        parseUnicodeEscapeUnit(text, i + 7, &lo) and
+                        lo >= 0xDC00 and lo <= 0xDFFF)
+                    {
+                        cp = 0x10000 + ((@as(u21, unit) - 0xD800) << 10) + (@as(u21, lo) - 0xDC00);
+                        consumed = 12;
+                    }
+                }
+                var utf8_buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(cp, &utf8_buf) catch {
+                    // 非法码点，原样输出
+                    try writer.writeAll(text[i .. i + consumed]);
+                    i += consumed;
+                    continue;
+                };
+                try writer.writeAll(utf8_buf[0..n]);
+                i += consumed;
+                continue;
+            },
+            else => {
+                try writer.writeByte(ch);
+                i += 1;
+                continue;
+            },
+        }
+        i += 2;
+    }
+}
+
+const LineMsg = struct {
+    user_text: ?[]const u8 = null,
+    assistant_text: ?[]const u8 = null,
+};
+
+/// 提取一行内的消息正文（优先 "text" 字段，其次 "content"；content 分支会剥离 <USER_REQUEST> 包裹）
+fn extractMsgText(line: []const u8) ?[]const u8 {
+    if (std.mem.indexOf(u8, line, "\"text\":\"")) |t_idx| {
+        const start = t_idx + 8;
+        if (std.mem.indexOfScalar(u8, line[start..], '"')) |t_end| {
+            return line[start .. start + t_end];
+        }
+        return null;
+    }
+    if (std.mem.indexOf(u8, line, "\"content\":\"")) |c_idx| {
+        const start = c_idx + 11;
+        var end = start;
+        while (end < line.len) : (end += 1) {
+            if (line[end] == '"' and line[end - 1] != '\\') break;
+        }
+        var t = line[start..end];
+        if (std.mem.indexOf(u8, t, "<USER_REQUEST>\\n")) |req_start| {
+            const real_start = req_start + 16;
+            if (std.mem.indexOf(u8, t[real_start..], "\\n</USER_REQUEST>")) |req_end| {
+                t = t[real_start .. real_start + req_end];
+            }
+        } else if (std.mem.indexOf(u8, t, "<USER_REQUEST>")) |req_start| {
+            const real_start = req_start + 14;
+            if (std.mem.indexOf(u8, t[real_start..], "</USER_REQUEST>")) |req_end| {
+                t = t[real_start .. real_start + req_end];
+            }
+        }
+        return t;
+    }
+    return null;
+}
+
+/// 解析一行 jsonl 里的用户/助手消息（过滤 <system-*/<local-* 控制行；空助手文本不产出）
+fn parseLineMsg(line: []const u8) LineMsg {
+    var out = LineMsg{};
+
+    const is_user = std.mem.indexOf(u8, line, "\"role\":\"user\"") != null or
+        std.mem.indexOf(u8, line, "\"type\":\"user\"") != null or
+        std.mem.indexOf(u8, line, "\"type\":\"USER_INPUT\"") != null;
+    if (is_user) {
+        if (extractMsgText(line)) |t| {
+            if (!std.mem.startsWith(u8, t, "<system-") and !std.mem.startsWith(u8, t, "<local-")) {
+                out.user_text = t;
+            }
+        }
+    }
+
+    const is_assistant = std.mem.indexOf(u8, line, "\"role\":\"assistant\"") != null or
+        std.mem.indexOf(u8, line, "\"type\":\"assistant\"") != null or
+        std.mem.indexOf(u8, line, "\"type\":\"PLANNER_RESPONSE\"") != null;
+    if (is_assistant) {
+        if (extractMsgText(line)) |t| {
+            if (t.len > 0) out.assistant_text = t;
+        }
+    }
+
+    return out;
+}
+
+/// 判断 seq 是否作为 step_index 出现在文件里（供 `lane msg` 在 step_index 与物理行号之间自动选口径）
+fn findStepIndex(path: []const u8, seq: u64) bool {
+    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
+    defer file.close();
+    var buf: [64 * 1024]u8 = undefined;
+    var reader = file.reader();
+    while (reader.readUntilDelimiterOrEof(&buf, '\n') catch null) |line| {
+        if (parseStepIndex(line)) |s| {
+            if (s == seq) return true;
+        }
+    }
+    return false;
+}
+
+/// `lane msg <会话ID> <序号> [--line]`：输出单条消息全文（永不截断），返回是否命中
+fn printSingleMessage(path: []const u8, seq: u64, force_by_line: bool) !bool {
+    const stdout = std.io.getStdOut().writer();
+    // 口径选择：显式 --line 用物理行号；否则 seq 命中 step_index 就用 step_index，否则回退行号
+    const by_line = force_by_line or !findStepIndex(path, seq);
+
+    const file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+
+    try stdout.print("\x1b[1;32m=== 单条消息全文: {s} ===\x1b[0m\n\x1b[90m匹配口径: {s} {d}\x1b[0m\n\n", .{ path, if (by_line) "物理行号" else "step_index", seq });
+
+    var buf: [64 * 1024]u8 = undefined;
+    var line_count: usize = 0;
+    var reader = file.reader();
+
+    while (true) {
+        const maybe_line = reader.readUntilDelimiterOrEof(&buf, '\n') catch |err| {
+            try stdout.print("\x1b[31m[!] 读取第 {d} 行失败（{s}），已停止解析。\x1b[0m\n", .{ line_count + 1, @errorName(err) });
+            break;
+        };
+        const line = maybe_line orelse break;
+        line_count += 1;
+
+        const step = parseStepIndex(line);
+        const hit = if (by_line) (line_count == seq) else (if (step) |s| s == seq else false);
+        if (!hit) continue;
+
+        const msg = parseLineMsg(line);
+        var printed: usize = 0;
+        if (msg.user_text) |t| {
+            try printMessageTag(stdout, "用户", "1;36", line_count, step);
+            try writeJsonUnescaped(stdout, t);
+            try stdout.print("\n\n", .{});
+            printed += 1;
+        }
+        if (msg.assistant_text) |t| {
+            try printMessageTag(stdout, "助手", "1;35", line_count, step);
+            try writeJsonUnescaped(stdout, t);
+            try stdout.print("\n\n", .{});
+            printed += 1;
+        }
+        if (printed == 0) {
+            // 兜底：该条无 text/content（如纯 tool_calls / thinking 记录），直接给未截断的原始 JSON，保证不空手而归
+            try stdout.print("\x1b[33m[原始 JSON] 该条无 text/content 字段，以下为未截断的原始记录：\x1b[0m\n{s}\n\n", .{line});
+        }
+        try stdout.print("\x1b[90m--- 命中: 文件第 {d} 行", .{line_count});
+        if (step) |s| try stdout.print("（step_index {d}）", .{s});
+        try stdout.print(" ---\x1b[0m\n", .{});
+        return true;
+    }
+    return false;
+}
+
 pub fn formatEpochSeconds(epoch_sec: i64, buf: []u8) []const u8 {
     if (epoch_sec <= 0) return "1970-01-01 00:00";
     const beijing_sec = epoch_sec + 8 * 3600;
@@ -446,7 +717,7 @@ pub fn extractJsonlTitle(path: []const u8, allocator: std.mem.Allocator) ![]cons
     return "(新会话)";
 }
 
-fn inspectSession(path: []const u8, summary_mode: bool, allocator: std.mem.Allocator) !void {
+fn inspectSession(path: []const u8, summary_mode: bool, full_mode: bool, allocator: std.mem.Allocator) !void {
     const stdout = std.io.getStdOut().writer();
     const file = try std.fs.openFileAbsolute(path, .{});
     defer file.close();
@@ -460,78 +731,34 @@ fn inspectSession(path: []const u8, summary_mode: bool, allocator: std.mem.Alloc
     var first_user: ?[]const u8 = null;
     var last_assistant: ?[]const u8 = null;
 
-    while (reader.readUntilDelimiterOrEof(&buf, '\n') catch null) |line| {
+    while (true) {
+        const maybe_line = reader.readUntilDelimiterOrEof(&buf, '\n') catch |err| {
+            // 旧版把 StreamTooLong 静默吞成 null 直接退出，导致超长行（>64KB）时 view 静默中断；这里显式告警
+            try stdout.print("\x1b[31m[!] 读取第 {d} 行失败（{s}），可能是单行超过 64KB 缓冲，已停止解析。\x1b[0m\n", .{ line_count + 1, @errorName(err) });
+            break;
+        };
+        const line = maybe_line orelse break;
         line_count += 1;
         if (line.len < 10) continue;
 
-        if (std.mem.indexOf(u8, line, "\"role\":\"user\"") != null or
-            std.mem.indexOf(u8, line, "\"type\":\"user\"") != null or
-            std.mem.indexOf(u8, line, "\"type\":\"USER_INPUT\"") != null)
-        {
-            var user_text: ?[]const u8 = null;
-            if (std.mem.indexOf(u8, line, "\"text\":\"")) |t_idx| {
-                const start = t_idx + 8;
-                if (std.mem.indexOfScalar(u8, line[start..], '"')) |t_end| {
-                    user_text = line[start .. start + t_end];
-                }
-            } else if (std.mem.indexOf(u8, line, "\"content\":\"")) |c_idx| {
-                const start = c_idx + 11;
-                var end = start;
-                while (end < line.len) : (end += 1) {
-                    if (line[end] == '"' and line[end - 1] != '\\') break;
-                }
-                var t = line[start..end];
-                if (std.mem.indexOf(u8, t, "<USER_REQUEST>\\n")) |req_start| {
-                    const real_start = req_start + 16;
-                    if (std.mem.indexOf(u8, t[real_start..], "\\n</USER_REQUEST>")) |req_end| {
-                        t = t[real_start .. real_start + req_end];
-                    }
-                } else if (std.mem.indexOf(u8, t, "<USER_REQUEST>")) |req_start| {
-                    const real_start = req_start + 14;
-                    if (std.mem.indexOf(u8, t[real_start..], "</USER_REQUEST>")) |req_end| {
-                        t = t[real_start .. real_start + req_end];
-                    }
-                }
-                user_text = t;
-            }
+        const msg = parseLineMsg(line);
+        const step = parseStepIndex(line);
 
-            if (user_text) |t| {
-                if (!std.mem.startsWith(u8, t, "<system-") and !std.mem.startsWith(u8, t, "<local-")) {
-                    if (first_user == null) first_user = try allocator.dupe(u8, t);
-                    if (!summary_mode) {
-                        try stdout.print("\x1b[1;36m[用户 #{d}]\x1b[0m {s}\n\n", .{ line_count, truncateUtf8Safe(t, 300) });
-                    }
-                }
+        if (msg.user_text) |t| {
+            if (first_user == null) first_user = try allocator.dupe(u8, t);
+            if (!summary_mode) {
+                try printMessageTag(stdout, "用户", "1;36", line_count, step);
+                try printMessageBody(stdout, t, full_mode);
+                try stdout.print("\n\n", .{});
             }
         }
 
-        if (std.mem.indexOf(u8, line, "\"role\":\"assistant\"") != null or
-            std.mem.indexOf(u8, line, "\"type\":\"assistant\"") != null or
-            std.mem.indexOf(u8, line, "\"type\":\"PLANNER_RESPONSE\"") != null)
-        {
-            var asst_text: ?[]const u8 = null;
-            if (std.mem.indexOf(u8, line, "\"text\":\"")) |t_idx| {
-                const start = t_idx + 8;
-                if (std.mem.indexOfScalar(u8, line[start..], '"')) |t_end| {
-                    asst_text = line[start .. start + t_end];
-                }
-            } else if (std.mem.indexOf(u8, line, "\"content\":\"")) |c_idx| {
-                const start = c_idx + 11;
-                var end = start;
-                while (end < line.len) : (end += 1) {
-                    if (line[end] == '"' and line[end - 1] != '\\') break;
-                }
-                const t = line[start..end];
-                if (t.len > 0) {
-                    asst_text = t;
-                }
-            }
-
-            if (asst_text) |t| {
-                last_assistant = try allocator.dupe(u8, t);
-                if (!summary_mode) {
-                    try stdout.print("\x1b[1;35m[助手 #{d}]\x1b[0m {s}\n\n", .{ line_count, truncateUtf8Safe(t, 300) });
-                }
+        if (msg.assistant_text) |t| {
+            last_assistant = try allocator.dupe(u8, t);
+            if (!summary_mode) {
+                try printMessageTag(stdout, "助手", "1;35", line_count, step);
+                try printMessageBody(stdout, t, full_mode);
+                try stdout.print("\n\n", .{});
             }
         }
     }
@@ -780,6 +1007,11 @@ pub fn main() !void {
     var is_index_subcmd: bool = false;
     var is_search_subcmd: bool = false;
     var force_index: bool = false;
+    var is_msg_subcmd: bool = false;
+    var msg_sid: ?[]const u8 = null;
+    var msg_seq: ?u64 = null;
+    var msg_by_line: bool = false;
+    var full_mode: bool = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -789,12 +1021,14 @@ pub fn main() !void {
                 \\  lane-fast [-n <N>] [-a <agy|qoder|cb|rea>] [-g <keyword>]... [-w <ws>] [-A]
                 \\  lane-fast search <keyword>... [-n <N>] [-w <ws>] [-a <agent>] [--bench]
                 \\  lane-fast index [--force]
-                \\  lane-fast <SESSION_ID_OR_KEYWORD> [-s]
+                \\  lane-fast <SESSION_ID_OR_KEYWORD> [-s] [--full]
+                \\  lane-fast msg <SESSION_ID> <SEQ> [--line]
                 \\  lane-fast bench
                 \\
                 \\Commands:
                 \\  search <keyword>...   Fast full-text search across transcripts using inverted index (< 5ms)
                 \\  index                 Build or incrementally update inverted index (/root/.agent/lane-search.idx)
+                \\  msg <SID> <SEQ>       Print ONE message in FULL (never truncated). SEQ matches step_index; --line matches physical line number
                 \\  bench                 Run speed benchmark across all search strategies
                 \\
                 \\Options:
@@ -804,6 +1038,8 @@ pub fn main() !void {
                 \\  -w, --workspace <WS>  Filter by workspace name
                 \\  -A, --all             Include empty/slash-command sessions
                 \\  -s, --summary         Summary mode when inspecting a session
+                \\      --full            Print message bodies in full (disable the 300-char truncation)
+                \\      --line            (msg) Match SEQ against the physical line number instead of step_index
                 \\  --force, -f           Force full rebuild of index (used with 'index')
                 \\  --bench               Print precise elapsed search time
                 \\
@@ -839,8 +1075,27 @@ pub fn main() !void {
             force_index = true;
         } else if (std.mem.eql(u8, arg, "--bench")) {
             do_bench = true;
+        } else if (std.mem.eql(u8, arg, "--full")) {
+            full_mode = true;
+        } else if (std.mem.eql(u8, arg, "--line")) {
+            msg_by_line = true;
+        } else if (std.mem.eql(u8, arg, "msg")) {
+            is_msg_subcmd = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            if (is_search_subcmd) {
+            if (is_msg_subcmd) {
+                if (msg_sid == null) {
+                    msg_sid = arg;
+                } else if (msg_seq == null) {
+                    msg_seq = std.fmt.parseInt(u64, arg, 10) catch null;
+                    if (msg_seq == null) {
+                        std.debug.print("序号必须是数字: {s}\n", .{arg});
+                        std.process.exit(1);
+                    }
+                } else {
+                    std.debug.print("msg 参数过多: {s}（用法: lane msg <会话ID> <序号> [--line]）\n", .{arg});
+                    std.process.exit(1);
+                }
+            } else if (is_search_subcmd) {
                 try grep_keywords.append(arg);
             } else {
                 inspect_kw = arg;
@@ -849,6 +1104,11 @@ pub fn main() !void {
             std.debug.print("未知参数: {s} (使用 -h 查看帮助)\n", .{arg});
             return;
         }
+    }
+
+    if (is_msg_subcmd and (msg_sid == null or msg_seq == null)) {
+        std.debug.print("用法: lane msg <会话ID> <序号> [--line]\n  序号默认按 step_index 匹配；--line 则按物理行号匹配\n", .{});
+        std.process.exit(1);
     }
 
     if (is_index_subcmd) {
@@ -1138,6 +1398,38 @@ pub fn main() !void {
         }
     }
 
+    // `lane msg <会话ID> <序号>`：输出单条消息全文（不截断）
+    if (is_msg_subcmd) {
+        const sid_kw = msg_sid.?;
+        var matched: ?SessionItem = null;
+        for (list.items) |item| {
+            if (std.mem.indexOf(u8, item.sid, sid_kw) != null) {
+                matched = item;
+                break;
+            }
+        }
+        if (matched == null) {
+            std.debug.print("未找到会话: {s}（可先用 `lane -g <关键词>` 或 `lane -a <agent>` 查 SID）\n", .{sid_kw});
+            std.process.exit(1);
+        }
+        const item = matched.?;
+        // 解析真实转录文件：agy 走 brain/<sid>/transcript.jsonl，其余用扫描到的 path
+        var transcript_path: []const u8 = item.path;
+        if (std.mem.endsWith(u8, item.path, ".db")) {
+            const candidate = try std.fmt.allocPrint(allocator, "/root/.gemini/antigravity-cli/brain/{s}/.system_generated/logs/transcript.jsonl", .{item.sid});
+            if (std.fs.openFileAbsolute(candidate, .{})) |f| {
+                f.close();
+                transcript_path = candidate;
+            } else |_| {}
+        }
+        const hit = printSingleMessage(transcript_path, msg_seq.?, msg_by_line) catch false;
+        if (!hit) {
+            std.debug.print("未找到序号 {d}（已自动尝试 step_index 与物理行号）；先用 `lane view {s}` 查看已列出的序号\n", .{ msg_seq.?, item.sid });
+            std.process.exit(1);
+        }
+        return;
+    }
+
     // 检查是否有 inspect 模式
     if (inspect_kw) |kw| {
         for (list.items) |item| {
@@ -1146,14 +1438,14 @@ pub fn main() !void {
                 printSessionCards(item.sid);
 
                 if (std.mem.endsWith(u8, item.path, ".jsonl")) {
-                    try inspectSession(item.path, summary_mode, allocator);
+                    try inspectSession(item.path, summary_mode, full_mode, allocator);
                     return;
                 } else if (std.mem.endsWith(u8, item.path, ".db")) {
                     // agy 会话：优先找 brain/<sid>/.system_generated/logs/transcript.jsonl
                     const transcript_path = try std.fmt.allocPrint(allocator, "/root/.gemini/antigravity-cli/brain/{s}/.system_generated/logs/transcript.jsonl", .{item.sid});
                     if (std.fs.openFileAbsolute(transcript_path, .{})) |file| {
                         file.close();
-                        try inspectSession(transcript_path, summary_mode, allocator);
+                        try inspectSession(transcript_path, summary_mode, full_mode, allocator);
                         return;
                     } else |_| {}
 
@@ -1278,6 +1570,104 @@ test "LaneCard statusIcon mapping" {
     try std.testing.expectEqualStrings("🔄", LaneCard.statusIcon("ongoing"));
     try std.testing.expectEqualStrings("❌", LaneCard.statusIcon("aborted"));
     try std.testing.expectEqualStrings("·", LaneCard.statusIcon("other"));
+}
+
+test "parseStepIndex reads step_index and rejects malformed" {
+    try std.testing.expectEqual(@as(?u64, 3970), parseStepIndex("{\"step_index\":3970,\"source\":\"MODEL\"}"));
+    try std.testing.expectEqual(@as(?u64, 27), parseStepIndex("{\"step_index\": 27, \"type\":\"x\"}"));
+    try std.testing.expectEqual(@as(?u64, 5), parseStepIndex("{\"step_index\" : 5}"));
+    try std.testing.expectEqual(@as(?u64, 0), parseStepIndex("{\"step_index\":0}"));
+    try std.testing.expectEqual(@as(?u64, null), parseStepIndex("{\"type\":\"GENERIC\"}"));
+    try std.testing.expectEqual(@as(?u64, null), parseStepIndex("{\"step_index\":\"abc\"}"));
+    try std.testing.expectEqual(@as(?u64, null), parseStepIndex("{\"step_index\":}"));
+    try std.testing.expectEqual(@as(?u64, null), parseStepIndex("{\"step_index\"}"));
+}
+
+test "countUtf8Chars counts chars not bytes" {
+    try std.testing.expectEqual(@as(usize, 0), countUtf8Chars(""));
+    try std.testing.expectEqual(@as(usize, 5), countUtf8Chars("Hello"));
+    try std.testing.expectEqual(@as(usize, 6), countUtf8Chars("你好世界，!"));
+    const long = "一二三四五六七八九十" ** 5;
+    try std.testing.expectEqual(@as(usize, 50), countUtf8Chars(long));
+    try std.testing.expectEqual(@as(usize, 4), countUtf8Chars(truncateUtf8Safe(long, 4)));
+}
+
+test "printMessageBody marks truncation with full length" {
+    var short_buf: [128]u8 = undefined;
+    var short_stream = std.io.fixedBufferStream(&short_buf);
+    try printMessageBody(short_stream.writer(), "短消息", false);
+    try std.testing.expectEqualStrings("短消息", short_stream.getWritten());
+
+    var long_buf: [4096]u8 = undefined;
+    var long_stream = std.io.fixedBufferStream(&long_buf);
+    const long = "x" ** 400;
+    try printMessageBody(long_stream.writer(), long, false);
+    const got = long_stream.getWritten();
+    // 必须带显式截断标记 + 全文字数，且正文只给前 300 字
+    try std.testing.expect(std.mem.indexOf(u8, got, "已截断") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "全文 400 字") != null);
+    try std.testing.expect(std.mem.startsWith(u8, got, "x" ** 300));
+
+    var full_buf: [4096]u8 = undefined;
+    var full_stream = std.io.fixedBufferStream(&full_buf);
+    try printMessageBody(full_stream.writer(), long, true);
+    try std.testing.expectEqualStrings(long, full_stream.getWritten());
+}
+
+test "writeJsonUnescaped restores escapes incl surrogate pairs" {
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const w = stream.writer();
+
+    try writeJsonUnescaped(w, "事实1：13GB\\n耗时约 22 秒\\t结束");
+    try std.testing.expectEqualStrings("事实1：13GB\n耗时约 22 秒\t结束", stream.getWritten());
+
+    stream.reset();
+    try writeJsonUnescaped(w, "引号\\\"与反斜杠\\\\与斜杠\\/与\\r回车");
+    try std.testing.expectEqualStrings("引号\"与反斜杠\\与斜杠/与\r回车", stream.getWritten());
+
+    stream.reset();
+    // \uXXXX（BMP）与代理对 emoji，以及非法转义原样保留
+    try writeJsonUnescaped(w, "\\u4f60\\u597d \\uD83D\\uDE00 \\x \\uZZZZ 尾部\\");
+    try std.testing.expectEqualStrings("你好 😀 \\x \\uZZZZ 尾部\\", stream.getWritten());
+}
+
+test "parseLineMsg extracts user (USER_REQUEST unwrap), assistant, filters control lines" {
+    const user_line = "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>\\n你好 lane\\n</USER_REQUEST>\"}";
+    const u = parseLineMsg(user_line);
+    try std.testing.expect(u.user_text != null);
+    try std.testing.expectEqualStrings("你好 lane", u.user_text.?);
+
+    const sys_line = "{\"type\":\"USER_INPUT\",\"content\":\"<system-reminder>ctrl</system-reminder>\"}";
+    try std.testing.expect(parseLineMsg(sys_line).user_text == null);
+
+    const asst_line = "{\"step_index\":12,\"type\":\"PLANNER_RESPONSE\",\"content\":\"结论：可用\"}";
+    const a = parseLineMsg(asst_line);
+    try std.testing.expect(a.assistant_text != null);
+    try std.testing.expectEqualStrings("结论：可用", a.assistant_text.?);
+
+    const text_field_line = "{\"role\":\"assistant\",\"text\":\"from text field\"}";
+    try std.testing.expectEqualStrings("from text field", parseLineMsg(text_field_line).assistant_text.?);
+
+    const tool_only = "{\"step_index\":13,\"type\":\"PLANNER_RESPONSE\",\"tool_calls\":[]}";
+    const t = parseLineMsg(tool_only);
+    try std.testing.expect(t.assistant_text == null);
+    try std.testing.expect(t.user_text == null);
+}
+
+test "findStepIndex scans a real jsonl file" {
+    const path = "/tmp/lane-fast-findstep-test.jsonl";
+    {
+        const f = try std.fs.createFileAbsolute(path, .{});
+        defer f.close();
+        try f.writeAll("{\"step_index\":10,\"type\":\"GENERIC\",\"content\":\"a\"}\n");
+        try f.writeAll("{\"step_index\":11,\"type\":\"GENERIC\",\"content\":\"b\"}\n");
+    }
+    defer std.fs.deleteFileAbsolute(path) catch {};
+    try std.testing.expect(findStepIndex(path, 10));
+    try std.testing.expect(findStepIndex(path, 11));
+    try std.testing.expect(!findStepIndex(path, 12));
+    try std.testing.expect(!findStepIndex("/tmp/definitely-missing-lane-fast.jsonl", 1));
 }
 
 test {

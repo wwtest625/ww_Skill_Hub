@@ -61,21 +61,21 @@ CB_PROJECTS_ROOT = "/root/.codebuddy/projects"
 
 # 动态加载查看器与管理器
 def get_modules():
-    spec_lv = importlib.util.spec_from_file_location("log_viewer", "/root/agent-log-viewer.py")
+    spec_lv = importlib.util.spec_from_file_location("log_viewer", "/root/.agent/scripts/agent-log-viewer.py")
     lv = importlib.util.module_from_spec(spec_lv)
     spec_lv.loader.exec_module(lv)
 
-    spec_mgr = importlib.util.spec_from_file_location("agent_manager", "/root/agent-manager.py")
+    spec_mgr = importlib.util.spec_from_file_location("agent_manager", "/root/.agent/scripts/agent-manager.py")
     mgr = importlib.util.module_from_spec(spec_mgr)
     spec_mgr.loader.exec_module(mgr)
     return lv, mgr
 
 
 def get_all_sessions_data(lv, mgr):
-    agy_mod = lv.load_module_from_file("agy_mod", "/root/agy-log-viewer.py")
-    qoder_mod = lv.load_module_from_file("qoder_mod", "/root/qoder-log-viewer.py")
-    cb_mod = lv.load_module_from_file("cb_mod", "/root/codebuddy-log-viewer.py")
-    cline_mod = lv.load_module_from_file("cline_mod", "/root/cline-log-viewer.py")
+    agy_mod = lv.load_module_from_file("agy_mod", "/root/.agent/scripts/agy-log-viewer.py")
+    qoder_mod = lv.load_module_from_file("qoder_mod", "/root/.agent/scripts/qoder-log-viewer.py")
+    cb_mod = lv.load_module_from_file("cb_mod", "/root/.agent/scripts/codebuddy-log-viewer.py")
+    cline_mod = lv.load_module_from_file("cline_mod", "/root/.agent/scripts/cline-log-viewer.py")
     meta = mgr.load_meta()
 
     raw_sessions = []
@@ -129,13 +129,13 @@ def get_session_detail_text(sid):
 
     cmd = ["python3"]
     if agent_type == "agy":
-        cmd.extend(["/root/agy-log-viewer.py", path, "-s", "-T"])
+        cmd.extend(["/root/.agent/scripts/agy-log-viewer.py", path, "-s", "-T"])
     elif agent_type == "qoder":
-        cmd.extend(["/root/qoder-log-viewer.py", path, "-s"])
+        cmd.extend(["/root/.agent/scripts/qoder-log-viewer.py", path, "-s"])
     elif agent_type == "codebuddy":
-        cmd.extend(["/root/codebuddy-log-viewer.py", path, "-s"])
+        cmd.extend(["/root/.agent/scripts/codebuddy-log-viewer.py", path, "-s"])
     elif agent_type == "cline":
-        cmd.extend(["/root/cline-log-viewer.py", path, "-s", "-T"])
+        cmd.extend(["/root/.agent/scripts/cline-log-viewer.py", path, "-s", "-T"])
 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
