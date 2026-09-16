@@ -1,1 +1,3 @@
 _bm_skillid_migration.json
+zig-out/
+.zig-cache/
