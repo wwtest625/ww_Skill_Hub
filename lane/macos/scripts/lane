@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Lane CLI (泳道模式 - 跨 Agent 协同总线)
+
+架构:
+  - 极速查询引擎: /Users/siri/.local/bin/lane-fast (Zig 0.14 原生编译，1.5ms 响应，零运行时开销；源码 /Users/siri/lane-fast)
+  - 任务注入中枢: /Users/siri/.agent/scripts/agent-inject.py
+  - 元数据与管理: /Users/siri/.agent/scripts/agent-manager.py
+  - 可视化控制台: /Users/siri/.agent/scripts/lane-panel.py
+"""
+import sys
+import os
+import argparse
+import subprocess
+
+SCRIPTS_DIR = "/Users/siri/.agent/scripts"
+AGENT_INJECT = f"{SCRIPTS_DIR}/agent-inject.py"
+AGENT_LOG_VIEWER = f"{SCRIPTS_DIR}/agent-log-viewer.py"
+AGENT_MANAGER = f"{SCRIPTS_DIR}/agent-manager.py"
+LANE_PANEL = f"{SCRIPTS_DIR}/lane-panel.py"
+LANE_FAST = "/Users/siri/.local/bin/lane-fast"
+TRAE_SYNC = "/Users/siri/.agent/scripts/trae_db.py"
+
+
+def is_fast_compatible(argv):
+    """判断当前参数是否可以由 Zig 高性能引擎 (lane-fast) 承载"""
+    if not os.path.isfile(LANE_FAST):
+        return False
+    # 特殊管理参数交由 Python 端
+    manager_flags = {"--trash", "--archived", "-t", "--tag", "--pin", "--dry-run"}
+    for arg in argv:
+        if arg in manager_flags:
+            return False
+    return True
+
+
+def sync_trae():
+    """增量刷新 Trae 解密镜像与导出 JSONL；失败时静默沿用旧数据。"""
+    if not os.path.isfile(TRAE_SYNC):
+        return
+    try:
+        res = subprocess.run(
+            ["python3", TRAE_SYNC, "sync", "--quiet"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20,
+        )
+        if res.returncode != 0:
+            print("[lane] Trae 解密同步失败，继续使用旧镜像；运行 `lane sync` 查看原因", file=sys.stderr)
+    except Exception:
+        pass
+
+
+def main():
+    os.umask(0o077)
+    sync_trae()
+    # 0. 无参数默认极速查看
+    if len(sys.argv) == 1:
+        if os.path.isfile(LANE_FAST):
+            subprocess.run([LANE_FAST, "-n", "25"])
+            return
+        subprocess.run(["python3", AGENT_LOG_VIEWER, "-n", "20"])
+        return
+
+    first_arg = sys.argv[1].lower()
+
+    # 显式原生加速：lane fast / lane -F
+    if first_arg in ("fast", "-F"):
+        if os.path.isfile(LANE_FAST):
+            subprocess.run([LANE_FAST] + sys.argv[2:])
+            return
+        else:
+            print("lane-fast 未就绪，fallback 至普通模式")
+            cmd = ["python3", AGENT_LOG_VIEWER] + sys.argv[2:]
+            subprocess.run(cmd)
+            return
+
+    # 快捷语法：lane <agent_name> "消息内容"
+    if first_arg in ("qoder", "codebuddy", "agy", "cb", "cline", "trae"):
+        agent = "codebuddy" if first_arg == "cb" else first_arg
+        if len(sys.argv) < 3:
+            print(f"用法: lane {first_arg} \"要发送的任务说明/提示词\"")
+            sys.exit(1)
+        if agent == "trae":
+            print("Trae GUI 暂不支持命令注入；会话记忆可通过 `lane -a trae` 查看，`lane resume trae` 打开应用。")
+            sys.exit(1)
+        msg = " ".join(sys.argv[2:])
+        cmd = [
+            "python3", AGENT_INJECT,
+            "--to", agent,
+            "--latest",
+            "--from-agent", "qoder",
+            "--msg", msg
+        ]
+        subprocess.run(cmd)
+        return
+
+    # 日志查看：lane log / lane ls / lane list
+    if first_arg in ("log", "logs", "ls", "list"):
+        if is_fast_compatible(sys.argv[2:]):
+            subprocess.run([LANE_FAST] + sys.argv[2:])
+            return
+        cmd = ["python3", AGENT_LOG_VIEWER] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    # 单会话查看：lane view <id> [-s] [-g kw]
+    if first_arg in ("view", "show", "cat"):
+        if len(sys.argv) < 3:
+            print("用法: lane view <会话ID> [-s] [-g 关键词]")
+            sys.exit(1)
+        if is_fast_compatible(sys.argv[2:]):
+            subprocess.run([LANE_FAST] + sys.argv[2:])
+            return
+        cmd = ["python3", AGENT_LOG_VIEWER] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    # 注入子命令：lane inject ...
+    if first_arg in ("inject", "send", "tell", "to"):
+        cmd = ["python3", AGENT_INJECT] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    # 会话管理命令转发
+    if first_arg in ("rename", "mv"):
+        cmd = ["python3", AGENT_MANAGER, "rename"] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    if first_arg in ("tag", "tags"):
+        sys.exit(subprocess.run([LANE_FAST, "tag"] + sys.argv[2:]).returncode)
+
+    if first_arg == "pin":
+        sys.exit(subprocess.run([LANE_FAST, "pin"] + sys.argv[2:]).returncode)
+
+    if first_arg in ("archive", "arc"):
+        sys.exit(subprocess.run([LANE_FAST, "archive"] + sys.argv[2:]).returncode)
+
+    if first_arg in ("rm", "del", "delete"):
+        sys.exit(subprocess.run([LANE_FAST, "rm"] + sys.argv[2:]).returncode)
+
+    if first_arg in ("restore", "undo"):
+        sys.exit(subprocess.run([LANE_FAST, "restore"] + sys.argv[2:]).returncode)
+
+    if first_arg in ("clean", "cleanup", "gc"):
+        sys.exit(subprocess.run([LANE_FAST, "clean"] + sys.argv[2:]).returncode)
+
+    if first_arg in ("title", "retitle"):
+        cmd = ["python3", AGENT_MANAGER, "title"] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    # 手动刷新 Trae 解密镜像
+    if first_arg in ("sync", "refresh"):
+        subprocess.run(["python3", TRAE_SYNC, "sync", "--force"])
+        return
+
+    # 可视化面板
+    if first_arg in ("panel", "ui", "web", "dash", "dashboard"):
+        cmd = ["python3", LANE_PANEL] + sys.argv[2:]
+        subprocess.run(cmd)
+        return
+
+    # 快捷接管：lane resume <agent> [id]
+    if first_arg in ("resume", "-r"):
+        if len(sys.argv) < 3:
+            print("用法: lane resume <qoder|codebuddy|agy|cline|trae> [会话ID]")
+            sys.exit(1)
+        agent = sys.argv[2].lower()
+        sid = sys.argv[3] if len(sys.argv) > 3 else ""
+        if agent == "qoder":
+            print(f"👉 运行命令接管: `qoder -r {sid}`" if sid else "👉 运行命令接管: `qoder -c`")
+        elif agent in ("codebuddy", "cb"):
+            print(f"👉 运行命令接管: `codebuddy -r {sid}`" if sid else "👉 运行命令接管: `codebuddy -c`")
+        elif agent == "agy":
+            print(f"👉 运行命令接管: `agy --conversation {sid}`" if sid else "👉 运行命令接管: `agy -c`")
+        elif agent == "cline":
+            print(f"👉 运行命令接管: `cline --id {sid} -i`" if sid else "👉 运行命令接管: `cline -i`")
+        elif agent == "trae":
+            if sid:
+                print(f"👉 Trae GUI 会话（{sid}）可在 Trae CN 的任务中心打开；记忆摘要: python3 /Users/siri/.agent/scripts/trae-log-viewer.py {sid}")
+            else:
+                print("👉 打开 Trae CN: `open -a \"Trae CN\"`")
+        return
+
+    # 纯查询与过滤（如 lane -n 10, lane -g vllm, lane -a qoder）优先尝试 Zig 引擎
+    if is_fast_compatible(sys.argv[1:]):
+        res = subprocess.run([LANE_FAST] + sys.argv[1:])
+        if res.returncode == 0:
+            return
+
+    # 默认传递给 agent-log-viewer
+    cmd = ["python3", AGENT_LOG_VIEWER] + sys.argv[1:]
+    subprocess.run(cmd)
+
+
+if __name__ == "__main__":
+    main()

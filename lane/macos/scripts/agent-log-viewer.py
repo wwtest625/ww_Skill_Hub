@@ -1,0 +1,633 @@
+#!/usr/bin/env python3
+"""三 Agent (agy / qoder / CodeBuddy) 统一会话记录查看器。
+
+聚合查看本机 /Users/siri 下三大 Agent 的全部会话历史与对话详情。
+默认自动过滤无实际交互的空会话与控制指令（如 (/resume)、(/clear)、(空会话)）。
+
+用法:
+  python3 agent-log-viewer.py                     # 统一按时间列出最近 25 条有效会话
+  python3 agent-log-viewer.py -n 50               # 查看最近 50 条会话
+  python3 agent-log-viewer.py -A / --all          # 查看全部会话（包含空会话/指令）
+  python3 agent-log-viewer.py -g 关键词           # 全局检索所有 Agent 的匹配会话
+  python3 agent-log-viewer.py -w 工作区           # 按工作空间/项目名筛选 (如 metax-workbench)
+  python3 agent-log-viewer.py --agent agy         # 仅看 agy 会话 (可选 agy / qoder / codebuddy)
+  python3 agent-log-viewer.py <会话ID>            # 自动识别 Agent 并查看完整会话
+  python3 agent-log-viewer.py <会话ID> -s         # 摘要模式查看
+  python3 agent-log-viewer.py <会话ID> -g 关键词   # 轮次过滤模式查看
+"""
+import sys
+import glob
+import os
+import re
+import json
+import sqlite3
+import signal
+import argparse
+import subprocess
+import importlib.util
+from datetime import datetime
+
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+AGY_CONV_DIRS = [
+    "/Users/siri/.gemini/antigravity/conversations",      # Antigravity GUI
+    "/Users/siri/.gemini/antigravity-cli/conversations",  # Antigravity CLI
+]
+QODER_PROJ_DIR = "/Users/siri/.qoder-cn/projects"
+CB_PROJ_DIR = "/Users/siri/.codebuddy/projects"
+CLINE_DATA_DIR = "/Users/siri/.cline/data"
+TRAE_MEM_DIR = "/Users/siri/.trae-cn/memory/projects"
+TRAE_EXPORT_DIR = "/Users/siri/.agent/trae/projects"
+
+
+def load_module_from_file(mod_name, file_path):
+    spec = importlib.util.spec_from_file_location(mod_name, file_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def normalize_workspace(raw_ws):
+    if not raw_ws:
+        return "root"
+    ws = str(raw_ws).strip()
+    if ws.startswith("["):
+        try:
+            arr = json.loads(ws)
+            if arr and isinstance(arr, list):
+                ws = arr[0]
+        except Exception:
+            ws = ws.strip("[]\"'")
+    if ws.startswith("file://"):
+        ws = ws[7:]
+    if ws.startswith("-"):
+        ws = ws[1:]
+    if ws in ("root", "/Users/siri", "/Users/siri/"):
+        return "root"
+    if ws.startswith("root-"):
+        ws = ws[5:]
+    elif ws.startswith("/Users/siri/"):
+        ws = ws[6:]
+    return ws or "root"
+
+
+def is_noisy_session(title):
+    if not title or title == "(空会话)":
+        return True
+    if title.startswith("(/") and title.endswith(")"):
+        return True
+    return False
+
+
+def format_size(bytes_val):
+    if bytes_val is None or bytes_val < 0:
+        return "-"
+    if bytes_val < 1024:
+        return f"{bytes_val}B"
+    elif bytes_val < 1024 * 1024:
+        return f"{bytes_val / 1024:.1f}KB"
+    else:
+        return f"{bytes_val / (1024 * 1024):.1f}MB"
+
+
+def extract_qoder_title(events):
+    title = next((e.get("aiTitle") or "" for e in events if e.get("type") == "ai-title"), "")
+    if title:
+        return title
+    for e in events:
+        if e.get("type") == "user":
+            msg = e.get("message") or {}
+            content = msg.get("content")
+            if isinstance(content, str):
+                text = content.strip()
+                if text.startswith("<system-reminder") or text.startswith("<local-command"):
+                    continue
+                m = re.search(r"<command-name>([^<]+)</command-name>", text)
+                if m:
+                    return f"({m.group(1)})"
+                if text:
+                    return text.replace("\n", " ")[:36]
+            elif isinstance(content, list):
+                for b in content:
+                    if b.get("type") in ("text", "input_text"):
+                        t = (b.get("text") or "").strip()
+                        if t and not t.startswith("<system-") and not t.startswith("<local-"):
+                            return t.replace("\n", " ")[:36]
+    return "(空会话)"
+
+
+def extract_cb_title(events):
+    title = next((e.get("aiTitle") or "" for e in events if e.get("type") == "ai-title"), "")
+    if title:
+        return title
+    for e in events:
+        if e.get("type") == "message" and e.get("role") == "user":
+            for b in e.get("content", []):
+                t = (b.get("text") or "").strip()
+                if not t or t.startswith("<system-reminder") or t.startswith("<local-command"):
+                    continue
+                m = re.search(r"<command-name>([^<]+)</command-name>", t)
+                if m:
+                    return f"({m.group(1)})"
+                return t.replace("\n", " ")[:36]
+    return "(空会话)"
+
+
+def load_lane_meta():
+    meta_path = "/Users/siri/.agent/lane-meta.json"
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def get_agy_sessions(agy_mod, grep=None, ws_filter=None, show_all=False):
+    files = []
+    for conv_dir in AGY_CONV_DIRS:
+        files.extend(
+            p for p in glob.glob(os.path.join(conv_dir, "*.db"))
+            if not p.endswith("conversation_summaries.db")
+        )
+    sums = agy_mod.load_summaries()
+    res = []
+    kw = grep.lower() if grep else None
+    wskw = ws_filter.lower() if ws_filter else None
+    for p in files:
+        sid = os.path.basename(p)[:-3]
+        mtime = os.path.getmtime(p)
+        ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        preview = sums.get(sid, {}).get("preview", "")
+        steps = sums.get(sid, {}).get("steps", 0)
+        raw_ws = sums.get(sid, {}).get("workspace", "")
+        ws = normalize_workspace(raw_ws)
+
+        title = preview
+        if not title:
+            if steps == 0:
+                title = "(空会话)"
+            else:
+                try:
+                    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+                    cur = conn.cursor()
+                    cur.execute("SELECT step_payload FROM steps WHERE step_type=14 ORDER BY idx LIMIT 1")
+                    row = cur.fetchone()
+                    conn.close()
+                    if row and row[0]:
+                        texts = agy_mod.extract_texts(row[0])
+                        title = texts[0].replace("\n", " ")[:36] if texts else "(未命名会话)"
+                    else:
+                        title = "(未命名会话)"
+                except Exception:
+                    title = "(未命名会话)"
+
+        if not show_all and is_noisy_session(title):
+            continue
+
+        if wskw and wskw not in ws.lower() and wskw not in str(raw_ws).lower():
+            continue
+        if kw:
+            if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not agy_mod.db_contains_keyword(p, grep):
+                continue
+        size_bytes = os.path.getsize(p) if os.path.isfile(p) else 0
+        res.append({
+            "agent": "agy",
+            "mtime": mtime,
+            "ts": ts,
+            "ws": ws,
+            "size_bytes": size_bytes,
+            "size_str": format_size(size_bytes),
+            "title": title,
+            "sid": sid,
+            "path": p
+        })
+    return res
+
+
+def get_qoder_sessions(qoder_mod, grep=None, ws_filter=None, show_all=False):
+    files = glob.glob(os.path.join(QODER_PROJ_DIR, "*", "*.jsonl"))
+    res = []
+    kw = grep.lower() if grep else None
+    wskw = ws_filter.lower() if ws_filter else None
+    for p in files:
+        mtime = os.path.getmtime(p)
+        ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        sid = os.path.basename(p)[:36]
+        raw_folder = os.path.basename(os.path.dirname(p))
+        ws = normalize_workspace(raw_folder)
+        events = qoder_mod.load_events(p)
+        title = extract_qoder_title(events)
+
+        if not show_all and is_noisy_session(title):
+            continue
+
+        if wskw and wskw not in ws.lower() and wskw not in raw_folder.lower():
+            continue
+        if kw:
+            if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not qoder_mod.file_contains_keyword(p, grep):
+                continue
+        size_bytes = os.path.getsize(p) if os.path.isfile(p) else 0
+        res.append({
+            "agent": "qoder",
+            "mtime": mtime,
+            "ts": ts,
+            "ws": ws,
+            "size_bytes": size_bytes,
+            "size_str": format_size(size_bytes),
+            "title": title,
+            "sid": sid,
+            "path": p
+        })
+    return res
+
+
+def load_cb_active_sessions():
+    """读 sessions/*.json 心跳(5分钟内), 经 change-session 链转移得真正活跃会话 -> hb_ms"""
+    import time
+    active = {}
+    now_ms = time.time() * 1000
+    for meta in glob.glob("/Users/siri/.codebuddy/sessions/*.json"):
+        try:
+            with open(meta, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            hb = d.get("lastHeartbeat", 0)
+            if now_ms - hb > 5 * 60 * 1000:
+                continue
+            ws_dir = (d.get("cwd", "").strip("/")).replace("/", "-")
+            cur_sid = d.get("sessionId", "")
+            for _ in range(5):
+                ap = os.path.join(CB_PROJ_DIR, ws_dir, cur_sid + ".jsonl")
+                if not os.path.isfile(ap):
+                    break
+                with open(ap, "rb") as f:
+                    f.seek(max(0, os.path.getsize(ap) - 8192))
+                    tail = f.read().decode("utf-8", "ignore")
+                m = re.findall(r"change session ([0-9a-f-]{36})", tail)
+                if not m or m[-1] == cur_sid:
+                    break
+                cur_sid = m[-1]
+            if cur_sid:
+                active[cur_sid] = hb
+        except Exception:
+            continue
+    return active
+
+
+def cb_tail_real_mtime(path):
+    """尾行是 change session 切换痕迹时, 回退为最后一条实质消息时间(epoch 秒)"""
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, os.path.getsize(path) - 8192))
+            tail = f.read().decode("utf-8", "ignore")
+        lines = [l for l in tail.rstrip().split("\n") if l.strip()]
+        if not lines or "<local-command-stdout>" not in lines[-1] or "change session " not in lines[-1]:
+            return None
+        for line in reversed(lines):
+            if "<local-command-stdout>" in line or "command-caveat" in line:
+                continue
+            m = re.search(r'"timestamp":(\d+)', line)
+            if m:
+                return int(m.group(1)) / 1000.0
+    except Exception:
+        pass
+    return None
+
+
+def get_trae_sessions(trae_mod, grep=None, ws_filter=None, show_all=False):
+    res = []
+    kw = grep.lower() if grep else None
+    wskw = ws_filter.lower() if ws_filter else None
+    sessions = trae_mod.get_sessions()
+    for s in sessions:
+        p = s.get("path") or ""
+        sid = s["sid"]
+        mtime = s.get("mtime") or 0
+        ts = s.get("ts") or datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        ws = normalize_workspace(s.get("ws") or "root")
+        title = s.get("title") or "(空会话)"
+
+        if not show_all and is_noisy_session(title):
+            continue
+        if wskw and wskw not in ws.lower() and wskw not in (s.get("project_path") or "").lower():
+            continue
+        if kw:
+            hit = kw in title.lower() or kw in sid.lower() or kw in ws.lower()
+            if not hit and s.get("kind") == "memory":
+                hit = trae_mod.file_contains_keyword(p, grep)
+            if not hit and s.get("kind") != "memory":
+                hit = trae_mod.db_contains_keyword(sid, grep)
+            if not hit:
+                continue
+        size_bytes = s.get("size_bytes") or 0
+        res.append({
+            "agent": "trae",
+            "mtime": mtime,
+            "ts": ts,
+            "ws": ws,
+            "size_bytes": size_bytes,
+            "size_str": format_size(size_bytes),
+            "title": title,
+            "sid": sid,
+            "path": p
+        })
+    return res
+
+
+def get_cb_sessions(cb_mod, grep=None, ws_filter=None, show_all=False):
+    files = glob.glob(os.path.join(CB_PROJ_DIR, "*", "*.jsonl"))
+    res = []
+    kw = grep.lower() if grep else None
+    wskw = ws_filter.lower() if ws_filter else None
+    active = load_cb_active_sessions()
+    for p in files:
+        mtime = os.path.getmtime(p)
+        ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        sid = os.path.basename(p)[:-6]
+        raw_ws = os.path.basename(os.path.dirname(p))
+        ws = normalize_workspace(raw_ws)
+        events = cb_mod.load_events(p)
+        title = extract_cb_title(events)
+
+        if not show_all and is_noisy_session(title):
+            continue
+
+        # change session 污染修正: 切换痕迹刷新的 mtime 回退为真实消息时间
+        real = cb_tail_real_mtime(p)
+        if real and real < mtime:
+            mtime = real
+        # 活跃会话(心跳+链转移): 提升至心跳时间并加 ⚡
+        if sid in active:
+            hb = active[sid] / 1000.0
+            if hb > mtime:
+                mtime = hb
+            title = "⚡ " + title
+        ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+
+        if wskw and wskw not in ws.lower() and wskw not in raw_ws.lower():
+            continue
+        if kw:
+            if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not cb_mod.file_contains_keyword(p, grep):
+                continue
+        size_bytes = os.path.getsize(p) if os.path.isfile(p) else 0
+        res.append({
+            "agent": "CodeBuddy",
+            "mtime": mtime,
+            "ts": ts,
+            "ws": ws,
+            "size_bytes": size_bytes,
+            "size_str": format_size(size_bytes),
+            "title": title,
+            "sid": sid,
+            "path": p
+        })
+    return res
+
+
+def get_cline_sessions(cline_mod, grep=None, ws_filter=None, show_all=False):
+    sums = cline_mod.load_summaries()
+    res = []
+    kw = grep.lower() if grep else None
+    wskw = ws_filter.lower() if ws_filter else None
+    for sid, info in sums.items():
+        title = info["title"]
+        if not show_all and is_noisy_session(title):
+            continue
+        ws = normalize_workspace(info["cwd"])
+        if wskw and wskw not in ws.lower() and wskw not in str(info["cwd"]).lower():
+            continue
+        msg_path = info["messages_path"]
+        if kw:
+            if kw not in title.lower() and kw not in sid.lower() and kw not in ws.lower() and not cline_mod.file_contains_keyword(msg_path, grep):
+                continue
+        size_bytes = 0
+        if msg_path and os.path.isfile(msg_path):
+            size_bytes = os.path.getsize(msg_path)
+        else:
+            sdir = os.path.join(CLINE_DATA_DIR, "sessions", sid)
+            if os.path.isdir(sdir):
+                for root, _, files in os.walk(sdir):
+                    for f in files:
+                        size_bytes += os.path.getsize(os.path.join(root, f))
+
+        res.append({
+            "agent": "cline",
+            "mtime": info["mtime"],
+            "ts": info["ts"],
+            "ws": ws,
+            "size_bytes": size_bytes,
+            "size_str": format_size(size_bytes),
+            "title": title,
+            "sid": sid,
+            "path": msg_path or sid
+        })
+    return res
+
+
+def find_session_agent(session_arg):
+    if not session_arg or not str(session_arg).strip():
+        return None, None
+    if os.path.isfile(session_arg):
+        if session_arg.endswith(".db"):
+            return "agy", session_arg
+        elif ".codebuddy" in session_arg:
+            return "codebuddy", session_arg
+        elif ".qoder" in session_arg:
+            return "qoder", session_arg
+        elif ".cline" in session_arg:
+            return "cline", session_arg
+        elif ".trae-cn" in session_arg or "session_memory_" in session_arg:
+            return "trae", session_arg
+
+    agy_matches = []
+    for conv_dir in AGY_CONV_DIRS:
+        agy_matches.extend(p for p in glob.glob(os.path.join(conv_dir, "*.db")) if session_arg in os.path.basename(p))
+    qoder_matches = [p for p in glob.glob(os.path.join(QODER_PROJ_DIR, "*", "*.jsonl")) if session_arg in os.path.basename(p)]
+    cb_matches = [p for p in glob.glob(os.path.join(CB_PROJ_DIR, "*", "*.jsonl")) if session_arg in os.path.basename(p)]
+    cline_matches = [p for p in glob.glob(os.path.join(CLINE_DATA_DIR, "sessions", "*", "*.messages.json")) if session_arg in os.path.basename(os.path.dirname(p))]
+    trae_matches = []
+    try:
+        trae_mod = load_module_from_file("trae_mod", "/Users/siri/.agent/scripts/trae-log-viewer.py")
+        _target = trae_mod.resolve_target(session_arg)
+        if _target:
+            trae_matches = [_target.get("path") or _target.get("sid")]
+    except SystemExit:
+        raise
+    except Exception:
+        trae_matches = []
+
+    total = len(agy_matches) + len(qoder_matches) + len(cb_matches) + len(cline_matches) + len(trae_matches)
+    if total == 0:
+        return None, None
+    if total > 1:
+        print(f"匹配到多个会话（共 {total} 个），请提供更精确的前缀：")
+        for p in agy_matches:
+            print(f"  [agy] {os.path.basename(p)[:-3]}")
+        for p in qoder_matches:
+            print(f"  [qoder] {os.path.basename(p)[:36]}")
+        for p in cb_matches:
+            print(f"  [CodeBuddy] {os.path.basename(p)[:-6]}")
+        for p in cline_matches:
+            print(f"  [cline] {os.path.basename(os.path.dirname(p))}")
+        for p in trae_matches:
+            base = os.path.basename(p)
+            sid = base[len("session_memory_"):-6] if base.startswith("session_memory_") else (base[:-6] if base.endswith(".jsonl") else base)
+            print(f"  [trae] {sid}")
+        sys.exit(1)
+
+    if agy_matches:
+        return "agy", agy_matches[0]
+    if qoder_matches:
+        return "qoder", qoder_matches[0]
+    if cb_matches:
+        return "codebuddy", cb_matches[0]
+    if cline_matches:
+        return "cline", cline_matches[0]
+    if trae_matches:
+        return "trae", trae_matches[0]
+    return None, None
+
+
+def main():
+    p = argparse.ArgumentParser(description="统一会话记录查看器 (agy / qoder / Trae / CodeBuddy / Cline)")
+    p.add_argument("session", nargs="?", help="会话 ID（前缀即可）或文件路径")
+    p.add_argument("-s", "--summary", action="store_true", help="摘要模式")
+    p.add_argument("-g", "--grep", metavar="关键词", help="全局搜索或对话内过滤关键词")
+    p.add_argument("-w", "--workspace", metavar="工作区", help="按工作区/项目名筛选 (如 metax-workbench)")
+    p.add_argument("-t", "--tag", metavar="标签", help="按标签筛选 (如 GPU, 归档)")
+    p.add_argument("-n", "--limit", type=int, default=25, help="列表最大显示数量 (默认 25)")
+    p.add_argument("-A", "--all", action="store_true", help="显示全部会话（包含空会话、指令、归档与回收站）")
+    p.add_argument("--trash", action="store_true", help="仅查看回收站中的会话")
+    p.add_argument("--archived", action="store_true", help="仅查看已归档的会话")
+    p.add_argument("-a", "--agent", choices=["agy", "qoder", "trae", "codebuddy", "cline", "all"], default="all",
+                   help="筛选特定 agent 的会话")
+    p.add_argument("-S", "--sort", choices=["time", "time-asc", "size", "size-asc"], default="time",
+                   help="排序方式: time(默认时间降序), time-asc(时间升序), size(体积降序), size-asc(体积升序)")
+    p.add_argument("-T", "--no-thinking", action="store_true", help="跳过思考流")
+    args = p.parse_args()
+
+    if args.session:
+        agent_type, path = find_session_agent(args.session)
+        if not agent_type:
+            print(f"未找到匹配会话: {args.session}")
+            sys.exit(1)
+        
+        cmd = ["python3"]
+        if agent_type == "agy":
+            cmd.extend(["/Users/siri/.agent/scripts/agy-log-viewer.py", path])
+            if args.summary: cmd.append("-s")
+            if args.grep: cmd.extend(["-g", args.grep])
+            if args.no_thinking: cmd.append("-T")
+        elif agent_type == "qoder":
+            cmd.extend(["/Users/siri/.agent/scripts/qoder-log-viewer.py", path])
+            if args.summary: cmd.append("-s")
+            if args.grep: cmd.extend(["-g", args.grep])
+        elif agent_type == "codebuddy":
+            cmd.extend(["/Users/siri/.agent/scripts/codebuddy-log-viewer.py", path])
+            if args.summary: cmd.append("-s")
+            if args.grep: cmd.extend(["-g", args.grep])
+        elif agent_type == "cline":
+            cmd.extend(["/Users/siri/.agent/scripts/cline-log-viewer.py", path])
+            if args.summary: cmd.append("-s")
+            if args.grep: cmd.extend(["-g", args.grep])
+            if args.no_thinking: cmd.append("-T")
+        elif agent_type == "trae":
+            cmd.extend(["/Users/siri/.agent/scripts/trae-log-viewer.py", path])
+            if args.summary: cmd.append("-s")
+            if args.grep: cmd.extend(["-g", args.grep])
+        
+        subprocess.run(cmd)
+        return
+
+    # 聚合列表模式
+    agy_mod = load_module_from_file("agy_mod", "/Users/siri/.agent/scripts/agy-log-viewer.py")
+    qoder_mod = load_module_from_file("qoder_mod", "/Users/siri/.agent/scripts/qoder-log-viewer.py")
+    cb_mod = load_module_from_file("cb_mod", "/Users/siri/.agent/scripts/codebuddy-log-viewer.py")
+    cline_mod = load_module_from_file("cline_mod", "/Users/siri/.agent/scripts/cline-log-viewer.py")
+    trae_mod = load_module_from_file("trae_mod", "/Users/siri/.agent/scripts/trae-log-viewer.py")
+    meta = load_lane_meta()
+
+    all_sessions = []
+    show_raw = args.all or args.trash or args.archived
+    if args.agent in ("all", "agy"):
+        all_sessions.extend(get_agy_sessions(agy_mod, grep=args.grep, ws_filter=args.workspace, show_all=show_raw))
+    if args.agent in ("all", "qoder"):
+        all_sessions.extend(get_qoder_sessions(qoder_mod, grep=args.grep, ws_filter=args.workspace, show_all=show_raw))
+    if args.agent in ("all", "codebuddy"):
+        all_sessions.extend(get_cb_sessions(cb_mod, grep=args.grep, ws_filter=args.workspace, show_all=show_raw))
+    if args.agent in ("all", "cline"):
+        all_sessions.extend(get_cline_sessions(cline_mod, grep=args.grep, ws_filter=args.workspace, show_all=show_raw))
+    if args.agent in ("all", "trae"):
+        all_sessions.extend(get_trae_sessions(trae_mod, grep=args.grep, ws_filter=args.workspace, show_all=show_raw))
+
+    # 应用增强元数据
+    enriched = []
+    for s in all_sessions:
+        m = meta.get(s["sid"], {})
+        if m.get("title"):
+            s["title"] = m["title"]
+        s["tags"] = m.get("tags", [])
+        s["pinned"] = m.get("pinned", False)
+        s["archived"] = m.get("archived", False)
+        s["deleted"] = m.get("deleted", False)
+
+        # 状态过滤
+        if args.trash:
+            if not s["deleted"]:
+                continue
+        elif not args.all:
+            if s["deleted"]:
+                continue
+            if args.archived:
+                if not s["archived"]:
+                    continue
+            else:
+                if s["archived"]:
+                    continue
+
+        # 标签过滤
+        if args.tag:
+            tag_kw = args.tag.lower()
+            if not any(tag_kw in t.lower() for t in s["tags"]):
+                continue
+
+        enriched.append(s)
+
+    # 排序：置顶在前，其余按用户指定规则排序
+    if args.sort == "size":
+        enriched.sort(key=lambda x: (not x["pinned"], -x.get("size_bytes", 0)))
+    elif args.sort == "size-asc":
+        enriched.sort(key=lambda x: (not x["pinned"], x.get("size_bytes", 0)))
+    elif args.sort == "time-asc":
+        enriched.sort(key=lambda x: (not x["pinned"], x["mtime"]))
+    else:  # time
+        enriched.sort(key=lambda x: (not x["pinned"], -x["mtime"]))
+
+    if not enriched:
+        status_name = "回收站中" if args.trash else ("已归档" if args.archived else "有效")
+        msg = f"未找到任何{status_name}会话记录"
+        print(msg)
+        return
+
+    total_count = len(enriched)
+    display_sessions = enriched[:args.limit]
+
+    print(f"{'修改时间':<17} {'Agent':<12} {'工作空间':<18} {'体积':<9} {'标题/主题':<36} 会话ID")
+    print("-" * 132)
+    for s in display_sessions:
+        agent_tag = f"[{s['agent']}]"
+        pin_prefix = "⭐ " if s["pinned"] else ""
+        tag_suffix = " " + "".join(f"[{t}]" for t in s["tags"]) if s["tags"] else ""
+        display_title = pin_prefix + s["title"] + tag_suffix
+        print(f"{s['ts']:<17} {agent_tag:<12} {s['ws'][:18]:<18} {s['size_str']:<9} {display_title[:36]:<36} {s['sid']}")
+    
+    hint = "（已自动过滤空会话/指令/归档/回收站，可用 -A 查看全部）" if not (args.all or args.trash or args.archived) else ""
+    if total_count > args.limit:
+        print(f"\n共 {total_count} 条记录，已展示前 {args.limit} 条（可用 -n <数字> 查看更多）{hint}。")
+    elif hint:
+        print(f"\n共 {total_count} 条记录 {hint}。")
+
+
+if __name__ == "__main__":
+    main()
