@@ -29,7 +29,16 @@ from datetime import datetime
 
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
+# agy 两套数据目录（结构一致）：桌面 IDE 版 + CLI 版
+AGY_DATA_DIRS = ["/root/.gemini/antigravity", "/root/.gemini/antigravity-cli"]
 AGY_CONV_DIR = "/root/.gemini/antigravity-cli/conversations"
+
+
+def agy_conv_dbs():
+    out = []
+    for d in AGY_DATA_DIRS:
+        out += glob.glob(os.path.join(d, "conversations", "*.db"))
+    return out
 QODER_PROJ_DIR = "/root/.qoder/projects"
 CB_PROJ_DIR = "/root/.codebuddy/projects"
 CLINE_DATA_DIR = "/root/.cline/data"
@@ -140,7 +149,7 @@ def load_lane_meta():
 
 
 def get_agy_sessions(agy_mod, grep=None, ws_filter=None, show_all=False):
-    files = [p for p in glob.glob(os.path.join(AGY_CONV_DIR, "*.db")) if not p.endswith("conversation_summaries.db")]
+    files = [p for p in agy_conv_dbs() if not p.endswith("conversation_summaries.db")]
     sums = agy_mod.load_summaries()
     res = []
     kw = grep.lower() if grep else None
@@ -388,7 +397,7 @@ def find_session_agent(session_arg):
         elif ".cline" in session_arg:
             return "cline", session_arg
 
-    agy_matches = [p for p in glob.glob(os.path.join(AGY_CONV_DIR, "*.db")) if session_arg in os.path.basename(p)]
+    agy_matches = [p for p in agy_conv_dbs() if session_arg in os.path.basename(p)]
     qoder_matches = [p for p in glob.glob(os.path.join(QODER_PROJ_DIR, "*", "*.jsonl")) if session_arg in os.path.basename(p)]
     cb_matches = [p for p in glob.glob(os.path.join(CB_PROJ_DIR, "*", "*.jsonl")) if session_arg in os.path.basename(p)]
     cline_matches = [p for p in glob.glob(os.path.join(CLINE_DATA_DIR, "sessions", "*", "*.messages.json")) if session_arg in os.path.basename(os.path.dirname(p))]

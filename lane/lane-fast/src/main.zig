@@ -1,6 +1,43 @@
 const std = @import("std");
 pub const search = @import("search.zig");
 
+/// agy 的两套数据目录（结构完全一致）：
+///   antigravity       —— 桌面 IDE 版
+///   antigravity-cli   —— CLI 版
+pub const AGY_DATA_DIRS = [_][]const u8{
+    "/root/.gemini/antigravity",
+    "/root/.gemini/antigravity-cli",
+};
+
+/// 根据会话 db 路径推出所属数据目录，再定位 brain/<sid>/.../transcript.jsonl。
+/// 找不到时兜底遍历另一套目录。返回 null 表示两边都没有。
+pub fn resolveAgyTranscript(db_path: []const u8, sid: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
+    var ordered: [2][]const u8 = undefined;
+    var n: usize = 0;
+    if (std.mem.indexOf(u8, db_path, "/antigravity-cli/")) |_| {
+        ordered[0] = AGY_DATA_DIRS[1];
+    } else if (std.mem.indexOf(u8, db_path, "/antigravity/")) |_| {
+        ordered[0] = AGY_DATA_DIRS[0];
+    } else {
+        ordered[0] = AGY_DATA_DIRS[0];
+    }
+    n = 1;
+    for (AGY_DATA_DIRS) |d| {
+        if (!std.mem.eql(u8, d, ordered[0])) {
+            ordered[n] = d;
+            n += 1;
+        }
+    }
+    for (ordered[0..n]) |root| {
+        const p = std.fmt.allocPrint(allocator, "{s}/brain/{s}/.system_generated/logs/transcript.jsonl", .{ root, sid }) catch return null;
+        if (std.fs.openFileAbsolute(p, .{})) |f| {
+            f.close();
+            return p;
+        } else |_| {}
+    }
+    return null;
+}
+
 pub const c = struct {
     pub const SQLITE_OK = 0;
     pub const SQLITE_ROW = 100;
@@ -1118,7 +1155,7 @@ pub fn main() !void {
 
     if (is_search_subcmd or grep_keywords.items.len > 0) {
         if (grep_keywords.items.len > 0 and inspect_kw == null) {
-            const ok = runIndexSearch(grep_keywords.items, limit, ws_filter, target_agent, do_bench, start_time, is_search_subcmd, allocator) catch false;
+            const ok = runIndexSearch(grep_keywords.items, limit, ws_filter, target_agent, do_bench, start_time, true, allocator) catch false;
             if (ok) return;
         }
     }
@@ -1208,8 +1245,12 @@ pub fn main() !void {
         };
         var summary_map = std.StringHashMap(SummaryInfo).init(allocator);
 
+        // agy 有两套数据目录：CLI 版与桌面 IDE 版（结构一致），都要汇总
+        for (AGY_DATA_DIRS) |agy_root| {
+        const sum_db_path = try std.fmt.allocPrint(allocator, "{s}/conversation_summaries.db", .{agy_root});
+        const sum_db_path_z = try allocator.dupeZ(u8, sum_db_path);
         var db_ptr: ?*c.sqlite3 = null;
-        const rc = c.sqlite3_open_v2("/root/.gemini/antigravity-cli/conversation_summaries.db", &db_ptr, c.SQLITE_OPEN_READONLY, null);
+        const rc = c.sqlite3_open_v2(sum_db_path_z, &db_ptr, c.SQLITE_OPEN_READONLY, null);
         if (db_ptr) |db| {
             defer _ = c.sqlite3_close(db);
             if (rc == c.SQLITE_OK) {
@@ -1226,6 +1267,10 @@ pub fn main() !void {
 
                             if (cid_c == null) continue;
                             const cid = try allocator.dupe(u8, std.mem.span(cid_c.?));
+                            // 两套目录存在同 ID 会话时，保留步骤更多的（信息更全）
+                            if (summary_map.get(cid)) |exist| {
+                                if (exist.steps >= steps) continue;
+                            }
                             const prev = if (prev_c) |p| try allocator.dupe(u8, std.mem.span(p)) else "";
                             const ws_str = if (ws_c) |w| try allocator.dupe(u8, cleanWorkspace(std.mem.span(w))) else "root";
 
@@ -1239,16 +1284,19 @@ pub fn main() !void {
                 }
             }
         }
+        }
 
-        // 直接扫描 /root/.gemini/antigravity-cli/conversations/*.db 保证任何正在运行的会话 100% 实时可见
-        var conv_dir = std.fs.openDirAbsolute("/root/.gemini/antigravity-cli/conversations", .{ .iterate = true }) catch null;
+        // 直接扫描两套目录的 conversations/*.db 保证任何正在运行的会话 100% 实时可见
+        for (AGY_DATA_DIRS) |agy_root| {
+        const conv_dir_path = try std.fmt.allocPrint(allocator, "{s}/conversations", .{agy_root});
+        var conv_dir = std.fs.openDirAbsolute(conv_dir_path, .{ .iterate = true }) catch null;
         if (conv_dir) |*cdir| {
             defer cdir.close();
             var iter = cdir.iterate();
             while (iter.next() catch null) |entry| {
                 if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".db")) {
                     const sid = entry.name[0 .. entry.name.len - 3];
-                    const db_file_path = try std.fmt.allocPrint(allocator, "/root/.gemini/antigravity-cli/conversations/{s}", .{entry.name});
+                    const db_file_path = try std.fmt.allocPrint(allocator, "{s}/conversations/{s}", .{ agy_root, entry.name });
                     const stat = std.fs.openFileAbsolute(db_file_path, .{}) catch continue;
                     const stat_info = stat.stat() catch {
                         stat.close();
@@ -1265,7 +1313,7 @@ pub fn main() !void {
                         ws_str = item_sum.ws;
                     } else {
                         // 未在 summary 库中 -> 正在进行中或新生成的会话！
-                        const trans_path = try std.fmt.allocPrint(allocator, "/root/.gemini/antigravity-cli/brain/{s}/.system_generated/logs/transcript.jsonl", .{sid});
+                        const trans_path = try std.fmt.allocPrint(allocator, "{s}/brain/{s}/.system_generated/logs/transcript.jsonl", .{ agy_root, sid });
                         const trans_title = extractJsonlTitle(trans_path, allocator) catch null;
                         if (trans_title) |tt| {
                             if (!std.mem.eql(u8, tt, "(空会话)") and !std.mem.eql(u8, tt, "(新会话)")) {
@@ -1286,7 +1334,7 @@ pub fn main() !void {
                         var all_matched = true;
                         for (grep_keywords.items) |kw| {
                             const kw_in_title = sliceContainsInsensitive(title, kw);
-                            const trans_path = try std.fmt.allocPrint(allocator, "/root/.gemini/antigravity-cli/brain/{s}/.system_generated/logs/transcript.jsonl", .{sid});
+                            const trans_path = try std.fmt.allocPrint(allocator, "{s}/brain/{s}/.system_generated/logs/transcript.jsonl", .{ agy_root, sid });
                             const kw_in_trans = if (!kw_in_title) fileContainsInsensitive(trans_path, kw) else false;
                             const kw_in_db = if (!kw_in_title and !kw_in_trans) blk: {
                                 const db_path_z = try allocator.dupeZ(u8, db_file_path);
@@ -1317,6 +1365,7 @@ pub fn main() !void {
                     });
                 }
             }
+        }
         }
     }
 
@@ -1416,11 +1465,9 @@ pub fn main() !void {
         // 解析真实转录文件：agy 走 brain/<sid>/transcript.jsonl，其余用扫描到的 path
         var transcript_path: []const u8 = item.path;
         if (std.mem.endsWith(u8, item.path, ".db")) {
-            const candidate = try std.fmt.allocPrint(allocator, "/root/.gemini/antigravity-cli/brain/{s}/.system_generated/logs/transcript.jsonl", .{item.sid});
-            if (std.fs.openFileAbsolute(candidate, .{})) |f| {
-                f.close();
+            if (resolveAgyTranscript(item.path, item.sid, allocator)) |candidate| {
                 transcript_path = candidate;
-            } else |_| {}
+            }
         }
         const hit = printSingleMessage(transcript_path, msg_seq.?, msg_by_line) catch false;
         if (!hit) {
@@ -1442,17 +1489,15 @@ pub fn main() !void {
                     return;
                 } else if (std.mem.endsWith(u8, item.path, ".db")) {
                     // agy 会话：优先找 brain/<sid>/.system_generated/logs/transcript.jsonl
-                    const transcript_path = try std.fmt.allocPrint(allocator, "/root/.gemini/antigravity-cli/brain/{s}/.system_generated/logs/transcript.jsonl", .{item.sid});
-                    if (std.fs.openFileAbsolute(transcript_path, .{})) |file| {
-                        file.close();
+                    if (resolveAgyTranscript(item.path, item.sid, allocator)) |transcript_path| {
                         try inspectSession(transcript_path, summary_mode, full_mode, allocator);
                         return;
-                    } else |_| {}
+                    }
 
-                    // 若 transcript 不存在，则调用 python3 /root/agy-log-viewer.py 兜底完整解析
+                    // 若 transcript 不存在，则调用 agy-log-viewer.py 兜底完整解析
                     var child_argv = std.ArrayList([]const u8).init(allocator);
                     try child_argv.append("python3");
-                    try child_argv.append("/root/agy-log-viewer.py");
+                    try child_argv.append("/root/.agent/scripts/agy-log-viewer.py");
                     try child_argv.append(item.path);
                     if (summary_mode) {
                         try child_argv.append("-s");

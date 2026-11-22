@@ -3,7 +3,7 @@ const main = @import("main.zig");
 
 pub const INDEX_PATH = "/root/.agent/lane-search.idx";
 pub const MAGIC: [8]u8 = "LSEIDX01".*;
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 pub const IndexHeader = extern struct {
     magic: [8]u8,
@@ -604,16 +604,15 @@ pub fn extractSessionTokens(
     try tokenizeText(title, &token_map, allocator);
 
     if (std.mem.eql(u8, agent, "agy")) {
-        const transcript_path = try std.fmt.allocPrint(allocator, "/root/.gemini/antigravity-cli/brain/{s}/.system_generated/logs/transcript.jsonl", .{sid});
-        defer allocator.free(transcript_path);
-
-        if (std.fs.openFileAbsolute(transcript_path, .{})) |tf| {
-            defer tf.close();
-            if (tf.readToEndAlloc(allocator, 50 * 1024 * 1024)) |t_content| {
-                defer allocator.free(t_content);
-                try tokenizeText(t_content, &token_map, allocator);
+        if (main.resolveAgyTranscript(path, sid, allocator)) |transcript_path| {
+            if (std.fs.openFileAbsolute(transcript_path, .{})) |tf| {
+                defer tf.close();
+                if (tf.readToEndAlloc(allocator, 50 * 1024 * 1024)) |t_content| {
+                    defer allocator.free(t_content);
+                    try tokenizeText(t_content, &token_map, allocator);
+                } else |_| {}
             } else |_| {}
-        } else |_| {}
+        }
 
         const db_path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(db_path_z);
@@ -724,9 +723,13 @@ pub fn scanAllSessionsMeta(list: *std.ArrayList(ScanSessionItem), allocator: std
         }
         summary_map.deinit();
     }
-    {
+    for (main.AGY_DATA_DIRS) |agy_root| {
         var db_ptr: ?*main.c.sqlite3 = null;
-        if (main.c.sqlite3_open_v2("/root/.gemini/antigravity-cli/conversation_summaries.db", &db_ptr, main.c.SQLITE_OPEN_READONLY, null) == main.c.SQLITE_OK) {
+        const sum_db_path = try std.fmt.allocPrint(allocator, "{s}/conversation_summaries.db", .{agy_root});
+        defer allocator.free(sum_db_path);
+        const sum_db_path_z = try allocator.dupeZ(u8, sum_db_path);
+        defer allocator.free(sum_db_path_z);
+        if (main.c.sqlite3_open_v2(sum_db_path_z, &db_ptr, main.c.SQLITE_OPEN_READONLY, null) == main.c.SQLITE_OK) {
             if (db_ptr) |db| {
                 defer _ = main.c.sqlite3_close(db);
                 var stmt: ?*main.c.sqlite3_stmt = null;
@@ -742,6 +745,10 @@ pub fn scanAllSessionsMeta(list: *std.ArrayList(ScanSessionItem), allocator: std
                             if (cid_c == null) continue;
                             const cid = try allocator.dupe(u8, std.mem.span(cid_c.?));
                             const prev = if (prev_c) |p| try allocator.dupe(u8, std.mem.span(p)) else try allocator.dupe(u8, "");
+                            if (summary_map.get(cid)) |exist| {
+                                allocator.free(cid);
+                                if (exist.steps >= steps) continue;
+                            }
                             const ws_str = if (ws_c) |w| try allocator.dupe(u8, main.cleanWorkspace(std.mem.span(w))) else try allocator.dupe(u8, "root");
                             try summary_map.put(cid, .{ .preview = prev, .ws = ws_str, .steps = steps });
                         }
@@ -749,15 +756,19 @@ pub fn scanAllSessionsMeta(list: *std.ArrayList(ScanSessionItem), allocator: std
                 }
             }
         }
+    }
 
-        var conv_dir = std.fs.openDirAbsolute("/root/.gemini/antigravity-cli/conversations", .{ .iterate = true }) catch null;
+    for (main.AGY_DATA_DIRS) |agy_root| {
+        const conv_dir_path = try std.fmt.allocPrint(allocator, "{s}/conversations", .{agy_root});
+        defer allocator.free(conv_dir_path);
+        var conv_dir = std.fs.openDirAbsolute(conv_dir_path, .{ .iterate = true }) catch null;
         if (conv_dir) |*cdir| {
             defer cdir.close();
             var iter = cdir.iterate();
             while (iter.next() catch null) |entry| {
                 if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".db")) {
                     const sid = entry.name[0 .. entry.name.len - 3];
-                    const db_file_path = try std.fmt.allocPrint(allocator, "/root/.gemini/antigravity-cli/conversations/{s}", .{entry.name});
+                    const db_file_path = try std.fmt.allocPrint(allocator, "{s}/conversations/{s}", .{ agy_root, entry.name });
                     const stat = std.fs.openFileAbsolute(db_file_path, .{}) catch continue;
                     const stat_info = stat.stat() catch {
                         stat.close();
@@ -773,7 +784,7 @@ pub fn scanAllSessionsMeta(list: *std.ArrayList(ScanSessionItem), allocator: std
                         title = if (item_sum.preview.len > 0) main.truncateUtf8Safe(item_sum.preview, 36) else "(空会话)";
                         ws_str = item_sum.ws;
                     } else {
-                        const trans_path = try std.fmt.allocPrint(allocator, "/root/.gemini/antigravity-cli/brain/{s}/.system_generated/logs/transcript.jsonl", .{sid});
+                        const trans_path = try std.fmt.allocPrint(allocator, "{s}/brain/{s}/.system_generated/logs/transcript.jsonl", .{ agy_root, sid });
                         defer allocator.free(trans_path);
                         const trans_title = main.extractJsonlTitle(trans_path, allocator) catch null;
                         if (trans_title) |tt| {
@@ -998,39 +1009,63 @@ pub fn buildOrUpdateIndex(force: bool, allocator: std.mem.Allocator) !void {
 
         try stdout.print("\x1b[33m[lane-search] 增量更新: 检测到 {d} 个会话变动，只重建变动段并合并\x1b[0m\n", .{changed_count});
 
-        // 提取旧索引中每个文档的 tokens
+        // 提取旧索引中每个文档的 tokens (逐条边界校验; 旧索引结构漂移时自动降级全量重建)
+        // 所有权说明: doc_tokens_map 的 value 是 ArrayList，其缓冲会被 build_items
+        // 按值复用。allocator 为进程级 arena，此处刻意不 deinit value，避免双重释放。
         var doc_tokens_map = std.AutoHashMap(u32, std.ArrayList([]const u8)).init(allocator);
-        defer {
-            var it = doc_tokens_map.valueIterator();
-            while (it.next()) |arr| {
-                arr.deinit();
-            }
-            doc_tokens_map.deinit();
-        }
+        defer doc_tokens_map.deinit();
 
+        var old_idx_usable = true;
+        const terms_region_lo: usize = @intCast(old_idx.header.terms_data_offset);
+        const terms_region_hi: usize = @intCast(old_idx.header.postings_offset);
         for (0..old_idx.header.num_terms) |t_idx| {
-            const t_pos = old_idx.header.terms_data_offset + old_idx.terms_offsets[t_idx];
+            const t_pos: usize = @intCast(old_idx.header.terms_data_offset + old_idx.terms_offsets[t_idx]);
+            if (t_pos < terms_region_lo or t_pos + 2 > terms_region_hi or t_pos + 2 > old_idx.file_bytes.len) {
+                old_idx_usable = false;
+                break;
+            }
             const t_len = std.mem.readInt(u16, old_idx.file_bytes[t_pos .. t_pos + 2][0..2], .little);
-            const t_str = old_idx.file_bytes[t_pos + 2 .. t_pos + 2 + t_len];
+            if (t_pos + 2 + t_len + 12 > terms_region_hi or t_pos + 2 + t_len + 12 > old_idx.file_bytes.len) {
+                old_idx_usable = false;
+                break;
+            }
+            const t_str_raw = old_idx.file_bytes[t_pos + 2 .. t_pos + 2 + t_len];
             const d_freq = std.mem.readInt(u32, old_idx.file_bytes[t_pos + 2 + t_len .. t_pos + 6 + t_len][0..4], .little);
             const p_offset = std.mem.readInt(u32, old_idx.file_bytes[t_pos + 6 + t_len .. t_pos + 10 + t_len][0..4], .little);
             const p_bytes_len = std.mem.readInt(u32, old_idx.file_bytes[t_pos + 10 + t_len .. t_pos + 14 + t_len][0..4], .little);
+            if (d_freq == 0 or d_freq > old_idx.header.num_docs) {
+                old_idx_usable = false;
+                break;
+            }
 
-            const doc_ids = try old_idx.decodePostings(.{
-                .term = t_str,
+            const doc_ids = old_idx.decodePostings(.{
+                .term = t_str_raw,
                 .doc_freq = d_freq,
                 .posting_offset = p_offset,
                 .posting_bytes_len = p_bytes_len,
-            }, allocator);
+            }, allocator) catch {
+                old_idx_usable = false;
+                break;
+            };
             defer allocator.free(doc_ids);
 
             for (doc_ids) |d_id| {
+                if (d_id >= old_idx.header.num_docs) {
+                    old_idx_usable = false;
+                    break;
+                }
                 var gop = try doc_tokens_map.getOrPut(d_id);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = std.ArrayList([]const u8).init(allocator);
                 }
-                try gop.value_ptr.append(t_str);
+                // dupe 脱离旧 mmap 生命周期，避免落盘改名后引用悬垂
+                try gop.value_ptr.append(try allocator.dupe(u8, t_str_raw));
             }
+        }
+
+        if (!old_idx_usable) {
+            try stdout.print("\x1b[33m[lane-search] 旧索引结构校验失败，自动降级全量重建...\x1b[0m\n", .{});
+            return buildOrUpdateIndex(true, allocator);
         }
 
         // 遍历所有当前会话

@@ -24,7 +24,6 @@ import importlib.util
 
 PORT = 3457
 META_FILE = "/root/.agent/lane-meta.json"
-AGY_CONV_DIR = "/root/.gemini/antigravity-cli/conversations"
 QODER_PROJ_DIR = "/root/.qoder/projects"
 CB_PROJ_DIR = "/root/.codebuddy/projects"
 

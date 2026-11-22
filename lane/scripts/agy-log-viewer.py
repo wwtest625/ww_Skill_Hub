@@ -25,26 +25,31 @@ from datetime import datetime
 
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
-DATA_DIR = "/root/.gemini/antigravity-cli"
-CONV_DIR = os.path.join(DATA_DIR, "conversations")
-SUMMARY_DB = os.path.join(DATA_DIR, "conversation_summaries.db")
+# agy 两套数据目录（结构一致）：桌面 IDE 版 (/antigravity) + CLI 版 (/antigravity-cli)
+AGY_DATA_DIRS = ["/root/.gemini/antigravity", "/root/.gemini/antigravity-cli"]
 
 
 def load_summaries():
     """conversation_id -> {preview, last_modified_time, step_count, workspace}"""
     out = {}
-    if not os.path.isfile(SUMMARY_DB):
-        return out
-    conn = sqlite3.connect(f"file:{SUMMARY_DB}?mode=ro", uri=True)
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT conversation_id, preview, last_modified_time, step_count, workspace_uris "
-                    "FROM conversation_summaries")
-        for cid, preview, mtime, steps, ws in cur.fetchall():
-            out[cid] = {"preview": preview or "", "mtime": mtime, "steps": steps or 0,
-                        "workspace": ws or ""}
-    finally:
-        conn.close()
+    for data_dir in AGY_DATA_DIRS:
+        summary_db = os.path.join(data_dir, "conversation_summaries.db")
+        if not os.path.isfile(summary_db):
+            continue
+        conn = sqlite3.connect(f"file:{summary_db}?mode=ro", uri=True)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT conversation_id, preview, last_modified_time, step_count, workspace_uris "
+                        "FROM conversation_summaries")
+            for cid, preview, mtime, steps, ws in cur.fetchall():
+                info = {"preview": preview or "", "mtime": mtime, "steps": steps or 0,
+                        "workspace": ws or "", "data_dir": data_dir}
+                # 两边同 ID 时取步骤更多的一份
+                if cid in out and out[cid]["steps"] >= info["steps"]:
+                    continue
+                out[cid] = info
+        finally:
+            conn.close()
     return out
 
 
@@ -71,7 +76,10 @@ def db_contains_keyword(db_path, kw):
 
 
 def list_sessions(grep=None):
-    files = sorted(glob.glob(os.path.join(CONV_DIR, "*.db")),
+    files = []
+    for data_dir in AGY_DATA_DIRS:
+        files += glob.glob(os.path.join(data_dir, "conversations", "*.db"))
+    files = sorted(files,
                    reverse=True, key=os.path.getmtime)
     if not files:
         print("未找到任何 agy 会话记录")
@@ -332,8 +340,10 @@ def main():
     if os.path.isfile(arg):
         path = arg
     else:
-        matches = [p for p in glob.glob(os.path.join(CONV_DIR, "*.db"))
-                   if arg in os.path.basename(p)]
+        all_dbs = []
+        for data_dir in AGY_DATA_DIRS:
+            all_dbs += glob.glob(os.path.join(data_dir, "conversations", "*.db"))
+        matches = [p for p in all_dbs if arg in os.path.basename(p)]
         if len(matches) == 1:
             path = matches[0]
         else:

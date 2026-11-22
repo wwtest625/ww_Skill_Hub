@@ -18,7 +18,16 @@ import subprocess
 import uuid
 from datetime import datetime
 
+# agy 两套数据目录（结构一致）：桌面 IDE 版 + CLI 版
+AGY_DATA_DIRS = ["/root/.gemini/antigravity", "/root/.gemini/antigravity-cli"]
 AGY_CONV_DIR = "/root/.gemini/antigravity-cli/conversations"
+
+
+def agy_conv_dbs():
+    out = []
+    for d in AGY_DATA_DIRS:
+        out += glob.glob(os.path.join(d, "conversations", "*.db"))
+    return out
 QODER_PROJ_DIR = "/root/.qoder/projects"
 CB_PROJ_DIR = "/root/.codebuddy/projects"
 CLINE_DATA_DIR = "/root/.cline/data"
@@ -36,8 +45,7 @@ def get_latest_session(agent):
         if files:
             return os.path.basename(files[0])[:-6]
     elif agent == "agy":
-        files = sorted(glob.glob(os.path.join(AGY_CONV_DIR, "*.db")),
-                       key=os.path.getmtime, reverse=True)
+        files = sorted(agy_conv_dbs(), key=os.path.getmtime, reverse=True)
         if files:
             return os.path.basename(files[0])[:-3]
     elif agent == "cline":
@@ -58,7 +66,7 @@ def resolve_full_id(agent, sid_prefix):
         matches = [os.path.basename(p)[:-6] for p in glob.glob(os.path.join(CB_PROJ_DIR, "*", "*.jsonl"))
                    if sid_prefix in os.path.basename(p)]
     elif agent == "agy":
-        matches = [os.path.basename(p)[:-3] for p in glob.glob(os.path.join(AGY_CONV_DIR, "*.db"))
+        matches = [os.path.basename(p)[:-3] for p in agy_conv_dbs()
                    if sid_prefix in os.path.basename(p)]
     elif agent == "cline":
         matches = [os.path.basename(os.path.dirname(p)) for p in glob.glob(os.path.join(CLINE_DATA_DIR, "sessions", "*", "*.messages.json"))

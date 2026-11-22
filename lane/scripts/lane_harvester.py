@@ -18,6 +18,9 @@ import sqlite3
 import time
 
 DB_PATH = "/root/.agent/lane-summary.db"
+# agy 两套数据目录（结构一致）：桌面 IDE 版 + CLI 版
+AGY_DATA_DIRS = ["/root/.gemini/antigravity", "/root/.gemini/antigravity-cli"]
+
 
 HOST_PATTERNS = [
     re.compile(r'\b(146|76|105|test03|WSL)\b', re.IGNORECASE),
@@ -190,7 +193,9 @@ def scan_and_harvest(incremental=True, backfill=False):
     cards_added = 0
 
     # 1. 扫描 AGY (brain/*/logs/transcript.jsonl)
-    agy_brains = glob.glob("/root/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl")
+    agy_brains = []
+    for agy_root in AGY_DATA_DIRS:  # CLI 版 + 桌面 IDE 版
+        agy_brains += glob.glob(f"{agy_root}/brain/*/.system_generated/logs/transcript.jsonl")
     for trans_path in agy_brains:
         total_processed += 1
         sid = trans_path.split("/")[-4]
@@ -314,7 +319,9 @@ def harvest_recent(max_age_sec=300):
     added = 0
 
     # 检查 AGY 正在进行的会话
-    agy_candidates = glob.glob("/root/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl")
+    agy_candidates = []
+    for agy_root in AGY_DATA_DIRS:  # CLI 版 + 桌面 IDE 版
+        agy_candidates += glob.glob(f"{agy_root}/brain/*/.system_generated/logs/transcript.jsonl")
     for trans_path in agy_candidates:
         try:
             st = os.stat(trans_path)

@@ -18,11 +18,36 @@ import importlib.util
 from datetime import datetime
 
 META_FILE = "/root/.agent/lane-meta.json"
+# agy 两套数据目录（结构一致）：桌面 IDE 版 + CLI 版
+AGY_DATA_DIRS = ["/root/.gemini/antigravity", "/root/.gemini/antigravity-cli"]
 AGY_CONV_DIR = "/root/.gemini/antigravity-cli/conversations"
+AGY_BRAIN_DIR = "/root/.gemini/antigravity-cli/brain"
 AGY_SUMMARY_DB = "/root/.gemini/antigravity-cli/conversation_summaries.db"
+
+
+def agy_conv_dbs():
+    out = []
+    for d in AGY_DATA_DIRS:
+        out += glob.glob(os.path.join(d, "conversations", "*.db"))
+    return out
+
+
+def agy_transcripts():
+    out = []
+    for d in AGY_DATA_DIRS:
+        out += glob.glob(os.path.join(d, "brain", "*", ".system_generated", "logs", "transcript.jsonl"))
+    return out
+
+
+def agy_data_dir_of(path):
+    """根据路径判断会话属于哪套 agy 目录，返回 (conv_dir, brain_dir, summary_db)"""
+    d = next((x for x in AGY_DATA_DIRS if path.startswith(x + "/")), AGY_DATA_DIRS[1])
+    return (os.path.join(d, "conversations"), os.path.join(d, "brain"),
+            os.path.join(d, "conversation_summaries.db"))
 QODER_PROJ_DIR = "/root/.qoder/projects"
 CB_PROJ_DIR = "/root/.codebuddy/projects"
 CLINE_DATA_DIR = "/root/.cline/data"
+REASONIX_PROJ_DIR = "/root/.reasonix/projects"
 LOCAL_VLLM_URL = "http://127.0.0.1:18080/v1/chat/completions"
 
 
@@ -50,13 +75,21 @@ def resolve_session(session_arg):
         return None, None, None
     sid_clean = session_arg.strip()
 
-    agy_files = [p for p in glob.glob(os.path.join(AGY_CONV_DIR, "*.db")) if sid_clean in os.path.basename(p)]
+    agy_files = [p for p in agy_conv_dbs() if sid_clean in os.path.basename(p)]
+    if not agy_files:
+        agy_files = [p for p in agy_transcripts() if sid_clean in p.split("/")[-4]]
     qoder_files = [p for p in glob.glob(os.path.join(QODER_PROJ_DIR, "*", "*.jsonl")) if sid_clean in os.path.basename(p)]
     cb_files = [p for p in glob.glob(os.path.join(CB_PROJ_DIR, "*", "*.jsonl")) if sid_clean in os.path.basename(p)]
     cline_files = [p for p in glob.glob(os.path.join(CLINE_DATA_DIR, "sessions", "*", "*.messages.json")) if sid_clean in os.path.basename(os.path.dirname(p))]
+    reasonix_files = [p for p in glob.glob(os.path.join(REASONIX_PROJ_DIR, "*", "sessions", "*.json")) if sid_clean in os.path.basename(p)]
 
-    total = len(agy_files) + len(qoder_files) + len(cb_files) + len(cline_files)
+    total = len(agy_files) + len(qoder_files) + len(cb_files) + len(cline_files) + len(reasonix_files)
     if total == 0:
+        # 兜底：从 meta 中直接查 full_sid
+        meta = load_meta()
+        for k in meta:
+            if k == sid_clean or k.startswith(sid_clean):
+                return "meta", k, None
         return None, None, None
     if total > 1:
         print(f"[-] 匹配到多个会话 ({total} 个)，请提供更详细的会话 ID 前缀。")
@@ -64,7 +97,8 @@ def resolve_session(session_arg):
 
     if agy_files:
         p = agy_files[0]
-        return "agy", os.path.basename(p)[:-3], p
+        sid = p.split("/")[-4] if "transcript.jsonl" in p else os.path.basename(p)[:-3]
+        return "agy", sid, p
     elif qoder_files:
         p = qoder_files[0]
         return "qoder", os.path.basename(p)[:36], p
@@ -75,6 +109,9 @@ def resolve_session(session_arg):
         p = cline_files[0]
         sid = os.path.basename(os.path.dirname(p))
         return "cline", sid, p
+    elif reasonix_files:
+        p = reasonix_files[0]
+        return "reasonix", os.path.basename(p)[:-5], p
 
     return None, None, None
 
@@ -348,10 +385,11 @@ def delete_session(sid, force=False):
         if path and os.path.exists(path):
             os.remove(path)
             deleted_items.append(path)
-        # 从 summaries db 中移除
-        if os.path.exists(AGY_SUMMARY_DB):
+        # 从 summaries db 中移除（按会话所属目录定位，兼容桌面 IDE 版）
+        summary_db = agy_data_dir_of(path)[2] if path else AGY_SUMMARY_DB
+        if os.path.exists(summary_db):
             try:
-                conn = sqlite3.connect(AGY_SUMMARY_DB)
+                conn = sqlite3.connect(summary_db)
                 conn.execute("DELETE FROM conversation_summaries WHERE conversation_id=?", (full_sid,))
                 conn.commit()
                 conn.close()
@@ -475,6 +513,52 @@ def clean_empty_sessions(dry_run=False, force=False, max_kb=20):
     return cleaned_count
 
 
+def clean_low_sessions(dry_run=False, force=False):
+    """一键将 Jev 打标为 low 的会话批量移入回收站 (置顶会话豁免)"""
+    meta = load_meta()
+    low_sids = [
+        sid for sid, data in meta.items()
+        if data.get("jev_level") == "low" and not data.get("deleted") and not data.get("pinned")
+    ]
+    if not low_sids:
+        print("[*] 没有 Jev 判定为 low 的活跃会话。先运行: lane jev")
+        return 0
+
+    con = None
+    summaries = {}
+    try:
+        con = sqlite3.connect(f"file:/root/.agent/lane-summary.db?mode=ro", uri=True)
+        for sid, conclusion in con.execute("SELECT session_id, conclusion FROM lane_cards"):
+            if sid not in summaries or not summaries[sid]:
+                summaries[sid] = (conclusion or "")[:40]
+    except Exception:
+        pass
+    finally:
+        if con:
+            con.close()
+
+    mode_str = "[预览模式]" if dry_run else ("[彻底销毁模式]" if force else "[回收站软删除模式]")
+    print(f"[*] Jev 判定 low 的会话共 {len(low_sids)} 条 {mode_str}:")
+    print("-" * 100)
+    for sid in low_sids:
+        ent = meta[sid]
+        title = ent.get("title") or summaries.get(sid, "-")
+        prob = ent.get("jev_prob", "-")
+        print(f"  🗑️  p={prob:<6} {sid[:8]}  {title}")
+    print("-" * 100)
+
+    if dry_run:
+        print(f"[*] 预览完毕，共 {len(low_sids)} 条待清理。去掉 --dry-run 执行 (默认软删除可 restore 还原)。")
+        return len(low_sids)
+
+    cleaned = 0
+    for sid in low_sids:
+        delete_session(sid, force=force)
+        cleaned += 1
+    print(f"[+] 清理完成！共处理 {cleaned} 个 low 会话 (回收站可用 lane restore <ID> 还原)。")
+    return cleaned
+
+
 def clean_trash_sessions(dry_run=False):
     """一键清空回收站：彻底物理销毁所有处于 deleted 状态的会话及其底层文件"""
     meta = load_meta()
@@ -526,6 +610,7 @@ def main():
 
     p_clean = sub.add_parser("clean", help="批量清道夫")
     p_clean.add_argument("--empty", action="store_true", help="扫描并清理所有空会话、控制指令残留及微型会话")
+    p_clean.add_argument("--low", action="store_true", help="将 Jev 判定为 low 价值的会话批量移入回收站")
     p_clean.add_argument("--trash", action="store_true", help="一键清空回收站（彻底物理销毁所有软删除会话）")
     p_clean.add_argument("--max-kb", type=int, default=20, help="清理体积小于指定 KB 的会话 (默认 20KB)")
     p_clean.add_argument("--dry-run", action="store_true", help="仅预览待清理清单，不实际删除")
@@ -568,6 +653,8 @@ def main():
     elif args.cmd == "clean":
         if args.trash:
             clean_trash_sessions(dry_run=args.dry_run)
+        elif args.low:
+            clean_low_sessions(dry_run=args.dry_run, force=args.force)
         elif args.empty:
             clean_empty_sessions(dry_run=args.dry_run, force=args.force, max_kb=args.max_kb)
         else:
